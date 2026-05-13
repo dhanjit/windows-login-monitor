@@ -19,11 +19,13 @@ Logon event ──▶ Scheduled task ──▶ LoginAlert.ps1
 
 ## Requirements
 
-- Windows 10 / 11
-- PowerShell 5.1+ (built-in)
+- Windows 10 build 1809+ / Windows 11 — x64 (ARM64 not supported)
+- PowerShell 5.1+ (built-in to Windows 10/11)
 - Administrator access (one-time, for setup)
 - A smartphone on the same Wi-Fi network as the PC
 - [ntfy app](https://ntfy.sh/) installed on the phone (free, no account)
+
+Tested on Windows 11 24H2. Should work on Server 2019/2022 but is not part of the test matrix.
 
 ## Quick start
 

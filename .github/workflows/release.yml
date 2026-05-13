@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install Inno Setup
+        run: winget install --id JRSoftware.InnoSetup --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+      - name: Build
+        shell: pwsh
+        working-directory: mcp-server
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          .\build\build.ps1 -Version $version
+      - name: Compute SHA256 (for winget manifest)
+        id: sha
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          $h = (Get-FileHash "dist\WindowsLoginMonitorMcp-Setup-$version.exe" -Algorithm SHA256).Hash
+          echo "sha=$h" >> $env:GITHUB_OUTPUT
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/WindowsLoginMonitorMcp-Setup-*.exe
+          body: |
+            Installer SHA256: `${{ steps.sha.outputs.sha }}`
+
+            ## winget manifest snippet
+            ```yaml
+            PackageVersion: ${{ steps.sha.outputs.version }}
+            Installers:
+              - Architecture: x64
+                InstallerUrl: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/WindowsLoginMonitorMcp-Setup-${{ steps.sha.outputs.version }}.exe
+                InstallerSha256: ${{ steps.sha.outputs.sha }}
+            ```

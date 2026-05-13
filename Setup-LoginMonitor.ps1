@@ -47,7 +47,9 @@ $monitorScript = @"
 `$phoneHome = Test-Connection -ComputerName `$PhoneIP -Count 2 -Quiet ``
              -ErrorAction SilentlyContinue
 
-`$user = `$env:USERNAME
+# Task runs as SYSTEM, so `$env:USERNAME would be "SYSTEM" — query the actual interactive user instead.
+`$ciUser = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+if (`$ciUser) { `$user = (`$ciUser -split '\\')[-1] } else { `$user = `$env:USERNAME }
 `$pc   = `$env:COMPUTERNAME
 `$time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
@@ -82,17 +84,32 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$monitorPath`""
 
-# Logon trigger fires for any user logon (interactive + unlock on most setups)
-$trigger   = New-ScheduledTaskTrigger -AtLogOn
+# Event 4801 (workstation unlock) is only logged when this audit subcategory is enabled.
+# Off by default on most Windows installs — turn it on so the unlock trigger has something to fire on.
+auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable | Out-Null
+Write-Host "Enabled audit policy: Other Logon/Logoff Events (Success)" -ForegroundColor Green
+
+# Trigger 1: logon (catches sign-in after reboot / sign-out / fast-user-switch)
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn
+
+# Trigger 2: workstation unlock (Security event 4801) — built via CIM since
+# New-ScheduledTaskTrigger doesn't expose event-based triggers directly.
+$cimClass = Get-CimClass -ClassName MSFT_TaskEventTrigger `
+    -Namespace Root/Microsoft/Windows/TaskScheduler
+$unlockTrigger = New-CimInstance -CimClass $cimClass -ClientOnly
+$unlockTrigger.Enabled = $true
+$unlockTrigger.Subscription =
+    "<QueryList><Query Id='0' Path='Security'><Select Path='Security'>*[System[EventID=4801]]</Select></Query></QueryList>"
+
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
 $settings  = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes 2)
 
 Register-ScheduledTask -TaskName $taskName `
-    -Action $action -Trigger $trigger `
+    -Action $action -Trigger @($logonTrigger, $unlockTrigger) `
     -Principal $principal -Settings $settings | Out-Null
-Write-Host "Registered scheduled task: $taskName" -ForegroundColor Green
+Write-Host "Registered scheduled task: $taskName (logon + unlock triggers)" -ForegroundColor Green
 
 # --- Save config summary ---
 $configPath = Join-Path $scriptDir "login-monitor-config.txt"
@@ -104,6 +121,8 @@ ntfy URL:       https://ntfy.sh/$topic
 Monitor script: $monitorPath
 Log file:       $scriptDir\login.log
 Task name:      $taskName
+Triggers:       logon + workstation unlock (Security event 4801)
+Audit policy:   "Other Logon/Logoff Events" was enabled by setup
 
 To receive alerts on your phone:
   1. Install the 'ntfy' app (Play Store / App Store)
