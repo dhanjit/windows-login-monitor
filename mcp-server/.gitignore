@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+server.log
+server.err.log
+server.pid
+auth_state.json
+run-server.ps1
