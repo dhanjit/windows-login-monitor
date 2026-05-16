@@ -63,23 +63,31 @@ The owner key only gates **the human step** at `/authorize` — it's never hande
 
 ## Install
 
-### Option A: winget (recommended)
+### Option A: download the installer from GitHub Releases (works today)
+
+1. Go to [Releases](https://github.com/dhanjit/windows-login-monitor/releases/latest).
+2. Download `WindowsLoginMonitorMcp-Setup-<version>.exe`.
+3. Run it (it'll request admin via UAC).
+
+The installer prompts for a public hostname (blank = local-only), generates an owner key, registers a logon scheduled task, adds you to **Event Log Readers**, and runs post-install health checks. Done in <30 s. No Python needed — the server is a self-contained bundled exe.
+
+### Option B: winget (once published)
 
 ```powershell
 winget install Dhanjit.WindowsLoginMonitorMcp
 ```
 
-The installer prompts for a public hostname (blank = local-only), generates an owner key, registers a logon scheduled task, and adds you to **Event Log Readers**. Done in <30 s.
+Works after the manifest is accepted into [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). Until then, use Option A — it installs the identical artifact.
 
-### Option B: from source
+### Option C: from source
 
 ```powershell
 cd mcp-server
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\Install-McpServer.ps1   # elevated; same end state as winget
+.\Install-McpServer.ps1   # elevated; same end state as the installer
 ```
 
-### Option C: just run it (dev)
+### Option D: just run it (dev)
 
 ```powershell
 echo "WLM_MCP_OWNER_KEY=$(python -c "import secrets;print(secrets.token_urlsafe(32))")" > .env
