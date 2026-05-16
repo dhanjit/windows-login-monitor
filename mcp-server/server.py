@@ -538,6 +538,17 @@ def build_app() -> Starlette:
 
 
 def main() -> None:
+    # The frozen exe is built windowless (no console), so stdout/stderr have
+    # nowhere to go. Route them to a log file in the user-writable state dir
+    # before anything prints — keeps uvicorn logs and tracebacks recoverable.
+    if getattr(sys, "frozen", False):
+        try:
+            fh = open(_state_dir() / "server.log", "a", buffering=1,
+                      encoding="utf-8", errors="replace")
+            sys.stdout = fh
+            sys.stderr = fh
+        except OSError:
+            pass
     if not OWNER_KEY:
         raise SystemExit(
             "ERROR: WLM_MCP_OWNER_KEY (or legacy WLM_MCP_TOKEN) is empty. "

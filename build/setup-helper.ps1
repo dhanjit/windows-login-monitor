@@ -151,8 +151,9 @@ Then in your client (e.g. Claude.ai Custom Connector):
   Tap Connect; the browser opens the authorize page.
   Paste the OWNER KEY above and submit. Done.
 
-Scheduled task: $taskName  (autostart at every logon)
-Log file:       $InstallDir\server.log
+Runs as:        scheduled task '$taskName', windowless, autostart at logon.
+                No console window - nothing to close by mistake.
+Log file:       %LOCALAPPDATA%\WindowsLoginMonitorMcp\server.log
 Re-show this:   notepad "$infoFile"
 "@ | Set-Content -Path $infoFile -Encoding UTF8
 
