@@ -12,6 +12,6 @@ UpgradeBehavior: install
 Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/dhanjit/windows-login-monitor/releases/download/v0.1.0/WindowsLoginMonitorMcp-Setup-0.1.0.exe
-    InstallerSha256: 0E1C074D970748D4699FBE39BB79EEF33FADBEE05A9B5C6CF262DBD026478EB1
+    InstallerSha256: B0CB622CB8A27BF61201C5CC81498B07FB8C92302F5A5E2EE48B0EA9EFFDFC10
 ManifestType: installer
 ManifestVersion: 1.6.0
