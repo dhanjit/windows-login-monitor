@@ -23,6 +23,7 @@ Auth: OAuth 2.1 per the MCP 2025-06-18 Authorization spec.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 import re
@@ -143,6 +144,49 @@ class HealthzMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class MetadataPatchMiddleware(BaseHTTPMiddleware):
+    """Patch the SDK's OAuth metadata so strict clients (Claude.ai) accept it.
+
+    The MCP SDK's build_metadata() hardcodes token_endpoint_auth_methods_supported
+    to the client_secret_* methods only — it never advertises 'none', even though
+    the server fully supports public clients (DCR with token_endpoint_auth_method
+    'none' + PKCE). A public client like Claude.ai rejects an AS that doesn't
+    advertise 'none'. We also drop the trailing slash pydantic adds to the issuer.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        path = request.url.path
+        if not path.startswith("/.well-known/oauth-"):
+            return response
+
+        body = b""
+        async for chunk in response.body_iterator:  # type: ignore[attr-defined]
+            body += chunk
+        try:
+            meta = json.loads(body)
+        except Exception:
+            from starlette.responses import Response as _Resp
+            return _Resp(content=body, status_code=response.status_code,
+                         media_type=response.media_type)
+
+        if path == "/.well-known/oauth-authorization-server":
+            for key in ("token_endpoint_auth_methods_supported",
+                        "revocation_endpoint_auth_methods_supported"):
+                if meta.get(key) is not None:
+                    meta[key] = list(dict.fromkeys(list(meta[key]) + ["none"]))
+            if isinstance(meta.get("issuer"), str):
+                meta["issuer"] = meta["issuer"].rstrip("/")
+        elif path.startswith("/.well-known/oauth-protected-resource"):
+            if isinstance(meta.get("authorization_servers"), list):
+                meta["authorization_servers"] = [
+                    s.rstrip("/") if isinstance(s, str) else s
+                    for s in meta["authorization_servers"]
+                ]
+
+        return JSONResponse(meta, status_code=response.status_code)
+
+
 # Session token cookie that proves the owner has authenticated at /authorize.
 # Generated fresh at server start; restarting invalidates all sessions.
 _SESSION_COOKIE_NAME = "wlm_session"
@@ -164,7 +208,7 @@ _AUTH_FORM_HTML = """<!doctype html><html lang="en"><head>
 </style></head><body>
 <h1>Authorize <code>__CLIENT__</code></h1>
 <p>This client is requesting access to <strong>Windows Login Monitor MCP</strong>. Enter the owner key from <code>.env</code> to approve.</p>
-<form method="POST" action="__SUBMIT__">
+<form method="POST" action="__ACTION__">
   <input type="password" name="owner_key" placeholder="Owner key" autocomplete="off" autofocus>
   __ERR__
   <button type="submit">Authorize</button>
@@ -174,9 +218,14 @@ _AUTH_FORM_HTML = """<!doctype html><html lang="en"><head>
 
 class OwnerKeyGateMiddleware(BaseHTTPMiddleware):
     """Before the SDK's OAuth /authorize handler runs, require the operator to
-    prove possession of the owner key. POST submits the key; on success we set
-    a short-lived session cookie and redirect to the original GET URL so the
-    SDK handler then runs normally."""
+    prove possession of the owner key.
+
+    The owner-key form POSTs to /authorize WITH the original OAuth query string
+    in its `action` attribute, so the POST request itself carries client_id,
+    code_challenge, etc. On a correct key we set a short-lived session cookie
+    and 303-redirect to that same path+query — the follow-up GET then sails
+    through to the SDK handler with all params intact. Relative URLs keep this
+    correct behind a TLS-terminating proxy (Cloudflare)."""
 
     AUTHORIZE_PATH = "/authorize"
 
@@ -188,37 +237,39 @@ class OwnerKeyGateMiddleware(BaseHTTPMiddleware):
         if request.cookies.get(_SESSION_COOKIE_NAME) == _SESSION_TOKEN:
             return await call_next(request)
 
+        # Relative path+query — scheme-agnostic, carries the OAuth params.
+        rel = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+
         if request.method == "POST":
             form = await request.form()
             provided = (form.get("owner_key") or "").strip()
-            original = form.get("original_url") or self.AUTHORIZE_PATH
             if OWNER_KEY and secrets.compare_digest(provided, OWNER_KEY):
-                resp = RedirectResponse(original, status_code=303)
+                resp = RedirectResponse(rel, status_code=303)
                 resp.set_cookie(
                     _SESSION_COOKIE_NAME, _SESSION_TOKEN,
                     max_age=_SESSION_TTL, httponly=True, secure=False, samesite="lax",
                 )
                 return resp
             # Bad key: re-show form with an error.
-            return HTMLResponse(_render_form(str(request.url), error="Wrong owner key."), status_code=401)
+            return HTMLResponse(_render_form(rel, error="Wrong owner key."), status_code=401)
 
         # GET without cookie: show the form.
-        return HTMLResponse(_render_form(str(request.url)), status_code=200)
+        return HTMLResponse(_render_form(rel), status_code=200)
 
 
-def _render_form(original_url: str, error: str | None = None) -> str:
-    # Pull client_name out of the query so the form can name what's asking.
-    from urllib.parse import urlparse, parse_qs, quote
-    qs = parse_qs(urlparse(original_url).query)
+def _render_form(action_url: str, error: str | None = None) -> str:
+    """Render the owner-key form. `action_url` (path+query of the /authorize
+    request) becomes the form's action verbatim, so the OAuth params ride the
+    POST — no hidden fields, no JS, no escaping games."""
+    from urllib.parse import urlparse, parse_qs
+    qs = parse_qs(urlparse(action_url).query)
     client_id = (qs.get("client_id", [""])[0])[:60] or "(unknown client)"
-    err_html = f'<div class="err">{error}</div>' if error else ""
+    err_html = f'<div class="err">{html.escape(error)}</div>' if error else ""
     return (
         _AUTH_FORM_HTML
-        .replace("__CLIENT__", client_id)
-        .replace("__SUBMIT__", "/authorize")
+        .replace("__CLIENT__", html.escape(client_id))
+        .replace("__ACTION__", html.escape(action_url, quote=True))
         .replace("__ERR__", err_html)
-        + f'<form id="state" style="display:none"><input name="original_url" value="{original_url}"></form>'
-        + f'<script>document.querySelector("form[action=\'/authorize\']").insertAdjacentHTML("beforeend", \'<input type=hidden name=original_url value="{original_url.replace(chr(34), "&quot;")}">\');</script>'
     )
 
 
@@ -532,6 +583,7 @@ def build_app() -> Starlette:
     # Add middleware directly to the FastMCP Starlette app so its lifespan
     # (which initializes the streamable-HTTP session manager) still runs.
     app = mcp.streamable_http_app()
+    app.add_middleware(MetadataPatchMiddleware)
     app.add_middleware(OwnerKeyGateMiddleware)
     app.add_middleware(HealthzMiddleware)
     return app
