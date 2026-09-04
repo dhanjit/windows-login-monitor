@@ -100,21 +100,60 @@ function Build-EnvSettings {
 $rawEnv = ""
 if (Test-Path -LiteralPath $envFile) { $rawEnv = Get-Content -LiteralPath $envFile -Raw }
 $existing = ConvertFrom-EnvText $rawEnv
-$ownerKey = $existing["WLM_MCP_OWNER_KEY"]
-if (-not $ownerKey) { $ownerKey = $existing["WLM_MCP_TOKEN"] }
-if (-not $ownerKey) {
-    $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-    $ownerKey = ([Convert]::ToBase64String($bytes)).TrimEnd('=').Replace('+','-').Replace('/','_')
+
+# Remote means a listener on the network, which is the only thing an owner key
+# protects. Local means the client spawns the exe over stdio: no port, no key,
+# no service. A blank hostname on an upgrade keeps whatever is deployed.
+$existingUrl = $existing["WLM_MCP_PUBLIC_URL"]
+$remote = [bool]$PublicHost -or
+          ($existingUrl -and $existingUrl -notmatch '127\.0\.0\.1|localhost')
+
+if ($remote) {
+    $ownerKey = $existing["WLM_MCP_OWNER_KEY"]
+    if (-not $ownerKey) { $ownerKey = $existing["WLM_MCP_TOKEN"] }
+    if (-not $ownerKey) {
+        $bytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $ownerKey = ([Convert]::ToBase64String($bytes)).TrimEnd('=').Replace('+','-').Replace('/','_')
+    }
 }
 
 # --- 2. Write .env (no BOM; python-dotenv chokes on it) ---
-# ACL first, contents second: the key must never exist in a world-readable file,
-# not even for the moment between creation and write.
-Protect-SecretFile -Path $envFile -OwnerAccount $me
-$settings = Build-EnvSettings -Existing $existing -PublicHost $PublicHost -OwnerKey $ownerKey
-$envLines = @($settings.Keys | ForEach-Object { "$_=$($settings[$_])" })
-[System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+if ($remote) {
+    # ACL first, contents second: the key must never exist in a world-readable
+    # file, not even for the moment between creation and write.
+    Protect-SecretFile -Path $envFile -OwnerAccount $me
+    $settings = Build-EnvSettings -Existing $existing -PublicHost $PublicHost -OwnerKey $ownerKey
+    $envLines = @($settings.Keys | ForEach-Object { "$_=$($settings[$_])" })
+    [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+} elseif (Test-Path -LiteralPath $envFile) {
+    # Local mode has no listener, so a stored key gates nothing. Leaving one on
+    # disk is the defect from #2 in a quieter form - a credential no code reads.
+    # Drop the secret lines, keep anything else, remove the file if that is all
+    # it held.
+    $kept = [ordered]@{}
+    foreach ($k in $existing.Keys) {
+        if ($k -notin @("WLM_MCP_OWNER_KEY", "WLM_MCP_TOKEN")) { $kept[$k] = $existing[$k] }
+    }
+    if ($kept.Count -gt 0) {
+        $keptLines = @($kept.Keys | ForEach-Object { "$_=$($kept[$_])" })
+        [System.IO.File]::WriteAllText($envFile, ($keptLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
+        Write-Host "Local mode: removed the owner key from $envFile (nothing reads it without a listener)."
+    } else {
+        Remove-Item -LiteralPath $envFile -Force
+        Write-Host "Local mode: removed $envFile (it held only the owner key)."
+    }
+}
+
+# --- 2b. Remove FIRST-RUN.txt from installs of 0.1.0 and earlier ---
+# It held a second cleartext copy of the owner key, nothing ever read it back,
+# and it inherited Program Files' ACL - readable by every local account.
+# Runs in both modes: a local-mode upgrade must clean it up too.
+$legacyInfoFile = Join-Path $InstallDir "FIRST-RUN.txt"
+if (Test-Path -LiteralPath $legacyInfoFile) {
+    Remove-Item -LiteralPath $legacyInfoFile -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed legacy $legacyInfoFile (it stored the owner key in cleartext)."
+}
 
 # --- 3. Add the installing user to Event Log Readers (Security log access) ---
 try {
@@ -126,8 +165,23 @@ try {
 }
 
 # --- 4. (Re)register the scheduled task as that user, autostart at logon ---
+# Only remote mode needs a long-running server. In local mode the MCP client
+# starts the exe on demand over stdio, so a background service would be a
+# listening port nobody asked for.
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    if (-not $remote) { Write-Host "Local mode: removed the '$taskName' background service." }
+}
+if (-not $remote) {
+    Get-Process windows-login-monitor-mcp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "=== Installed (local mode) ===" -ForegroundColor Cyan
+    Write-Host "No key, no service, no open port. Register it with your MCP client:"
+    Write-Host ""
+    Write-Host "  claude mcp add windows-login-monitor -- `"$exe`" --stdio" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Re-run the installer with a public hostname to expose it remotely instead."
+    exit 0
 }
 $action    = New-ScheduledTaskAction -Execute $exe -WorkingDirectory $InstallDir
 $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $me
@@ -189,16 +243,6 @@ if (-not $allOk) {
     Write-Host "  - Task state:  Get-ScheduledTask -TaskName $taskName | Select-Object State, @{n='LastResult';e={(`$_ | Get-ScheduledTaskInfo).LastTaskResult}}"
     Write-Host "  - Port 8765:   Get-NetTCPConnection -LocalPort 8765"
     Write-Host "  - Last error:  $probeError"
-}
-
-# --- 6. Remove FIRST-RUN.txt from installs of 0.1.0 and earlier ---
-# It held a second cleartext copy of the owner key, nothing ever read it back,
-# and it inherited Program Files' ACL - readable by every local account.
-# The key now lives in .env only; Show-OwnerKey.ps1 displays it on demand.
-$legacyInfoFile = Join-Path $InstallDir "FIRST-RUN.txt"
-if (Test-Path -LiteralPath $legacyInfoFile) {
-    Remove-Item -LiteralPath $legacyInfoFile -Force -ErrorAction SilentlyContinue
-    Write-Host "Removed legacy $legacyInfoFile (it stored the owner key in cleartext)."
 }
 
 # Console only - this output is not captured to a file anywhere.
