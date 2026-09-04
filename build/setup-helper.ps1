@@ -54,17 +54,54 @@ function Protect-SecretFile {
     }
 }
 
-# --- 1. Reuse or generate owner key (accept legacy WLM_MCP_TOKEN too) ---
-$ownerKey = $null
-if (Test-Path $envFile) {
-    $raw = Get-Content $envFile -Raw
-    $m = [regex]::Match($raw, 'WLM_MCP_OWNER_KEY\s*=\s*(\S+)')
-    if ($m.Success) { $ownerKey = $m.Groups[1].Value }
-    if (-not $ownerKey) {
-        $m = [regex]::Match($raw, 'WLM_MCP_TOKEN\s*=\s*(\S+)')
-        if ($m.Success) { $ownerKey = $m.Groups[1].Value }
+# Parse a .env into an ordered key -> value map. Comments and blank lines are
+# dropped: the installer regenerates this file rather than editing it in place.
+function ConvertFrom-EnvText {
+    param([string]$Text)
+    $settings = [ordered]@{}
+    if (-not $Text) { return $settings }
+    foreach ($line in ($Text -split "`r?`n")) {
+        if ($line -match '^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$') {
+            $settings[$Matches[1]] = $Matches[2].Trim()
+        }
     }
+    return $settings
 }
+
+# Compose the .env contents, keeping settings the installer does not own.
+# An upgrade run by `winget upgrade` (or any /VERYSILENT install) gets no
+# -PublicHost, because the wizard page never opens. Rewriting the file from
+# defaults in that case would replace a tunnelled deployment with loopback and
+# drop the allowed-hosts list, so every remote client breaks on upgrade. Only
+# overwrite the endpoint settings when a hostname was actually supplied.
+function Build-EnvSettings {
+    param(
+        [System.Collections.Specialized.OrderedDictionary]$Existing,
+        [string]$PublicHost,
+        [Parameter(Mandatory=$true)][string]$OwnerKey
+    )
+    $settings = [ordered]@{}
+    if ($Existing) { foreach ($k in $Existing.Keys) { $settings[$k] = $Existing[$k] } }
+
+    $settings["WLM_MCP_OWNER_KEY"] = $OwnerKey
+    $settings.Remove("WLM_MCP_TOKEN")   # legacy name; do not leave a second copy of the secret
+
+    if ($PublicHost) {
+        $settings["WLM_MCP_PUBLIC_URL"]    = "https://$PublicHost"
+        $settings["WLM_MCP_HOST"]          = "0.0.0.0"
+        $settings["WLM_MCP_ALLOWED_HOSTS"] = $PublicHost
+    } elseif (-not $settings["WLM_MCP_PUBLIC_URL"]) {
+        $settings["WLM_MCP_PUBLIC_URL"] = "http://127.0.0.1:8765"
+    }
+    return $settings
+}
+
+# --- 1. Reuse or generate owner key (accept legacy WLM_MCP_TOKEN too) ---
+$rawEnv = ""
+if (Test-Path -LiteralPath $envFile) { $rawEnv = Get-Content -LiteralPath $envFile -Raw }
+$existing = ConvertFrom-EnvText $rawEnv
+$ownerKey = $existing["WLM_MCP_OWNER_KEY"]
+if (-not $ownerKey) { $ownerKey = $existing["WLM_MCP_TOKEN"] }
 if (-not $ownerKey) {
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
@@ -75,15 +112,8 @@ if (-not $ownerKey) {
 # ACL first, contents second: the key must never exist in a world-readable file,
 # not even for the moment between creation and write.
 Protect-SecretFile -Path $envFile -OwnerAccount $me
-$publicUrl = if ($PublicHost) { "https://$PublicHost" } else { "http://127.0.0.1:8765" }
-$envLines = @(
-    "WLM_MCP_OWNER_KEY=$ownerKey",
-    "WLM_MCP_PUBLIC_URL=$publicUrl"
-)
-if ($PublicHost) {
-    $envLines += "WLM_MCP_HOST=0.0.0.0"
-    $envLines += "WLM_MCP_ALLOWED_HOSTS=$PublicHost"
-}
+$settings = Build-EnvSettings -Existing $existing -PublicHost $PublicHost -OwnerKey $ownerKey
+$envLines = @($settings.Keys | ForEach-Object { "$_=$($settings[$_])" })
 [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
 
 # --- 3. Add the installing user to Event Log Readers (Security log access) ---

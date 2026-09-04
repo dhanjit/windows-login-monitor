@@ -97,10 +97,24 @@ Write-Host "Installing dependencies..." -ForegroundColor Yellow
 Write-Host "Dependencies installed." -ForegroundColor Green
 
 # --- Prompt for public hostname (optional) ---
-$publicHost = Read-Host "Public hostname your tunnel/proxy will expose this on (blank = local-only)"
+# On a re-run, blank keeps whatever is already deployed. Silently resetting a
+# tunnelled install to loopback would break every remote client.
+$envFile = Join-Path $installDir ".env"
+$currentHost = ""
+if (Test-Path -LiteralPath $envFile) {
+    $m = [regex]::Match((Get-Content -LiteralPath $envFile -Raw), 'WLM_MCP_PUBLIC_URL\s*=\s*(\S+)')
+    if ($m.Success -and $m.Groups[1].Value -notmatch '127\.0\.0\.1|localhost') {
+        $currentHost = ([uri]$m.Groups[1].Value).Host
+    }
+}
+if ($currentHost) {
+    $publicHost = Read-Host "Public hostname [$currentHost] (blank = keep)"
+    if (-not $publicHost) { $publicHost = $currentHost }
+} else {
+    $publicHost = Read-Host "Public hostname your tunnel/proxy will expose this on (blank = local-only)"
+}
 
 # --- Generate (or reuse) owner key ---
-$envFile = Join-Path $installDir ".env"
 $ownerKey = $null
 if (Test-Path $envFile) {
     $raw = Get-Content $envFile -Raw

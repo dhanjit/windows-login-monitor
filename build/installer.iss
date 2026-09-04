@@ -77,7 +77,7 @@ begin
     'Public hostname',
     'Where will this MCP be reachable?',
     'You host the server locally; you choose how to expose it - Cloudflare Tunnel, Tailscale Funnel, ngrok, Caddy + DDNS, anything that proxies HTTPS to 127.0.0.1:8765.' + #13#10 +
-    'Enter the public hostname your tunnel/proxy will use, or leave blank for local-only (you can edit .env later).');
+    'Enter the public hostname your tunnel/proxy will use. Leave blank to keep the current setting on an upgrade, or for local-only on a first install (you can edit .env later).');
   HostnamePage.Add('Public hostname (e.g. mcp.example.com):', False);
   HostnamePage.Values[0] := '';
 end;
