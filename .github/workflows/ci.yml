@@ -80,7 +80,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: winget validate
         shell: pwsh
-        run: winget validate --manifest build/manifests/0.1.1
+        run: winget validate --manifest build/manifests/0.1.2
 
   build-installer:
     name: Build installer + smoke-run the bundled exe
