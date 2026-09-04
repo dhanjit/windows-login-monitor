@@ -48,20 +48,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\dist\windows-login-monitor-mcp.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "setup-helper.ps1";                  DestDir: "{app}"; Flags: ignoreversion
 Source: "uninstall-helper.ps1";              DestDir: "{app}"; Flags: ignoreversion
-Source: "Show-OwnerKey.ps1";                 DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
 Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-helper.ps1"" -InstallDir ""{app}"" -PublicHost ""{code:GetPublicHost}"""; \
-    StatusMsg: "Generating token, registering scheduled task..."; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\setup-helper.ps1"" -InstallDir ""{app}"""; \
+    StatusMsg: "Granting event log access, removing any old service..."; \
     Flags: runhidden waituntilterminated
-
-; Shows the key on screen, read from .env. Deliberately not a file: a second
-; cleartext copy under {app} would be readable by every local account.
-Filename: "powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Show-OwnerKey.ps1"" -InstallDir ""{app}"""; \
-    Description: "Show the owner key and connector setup info"; \
-    Flags: postinstall skipifsilent nowait
 
 [UninstallRun]
 Filename: "powershell.exe"; \
@@ -76,40 +68,19 @@ Type: files; Name: "{app}\server.err.log"
 Type: files; Name: "{app}\FIRST-RUN.txt"
 
 [Code]
-var
-  HostnamePage: TInputQueryWizardPage;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
 begin
   Result := '';
-  // Runs before any file is replaced. Stop the task first, so its restart
-  // policy cannot respawn the server between the kill and the copy, then make
-  // sure no instance is left holding the exe. Both are no-ops on a first
-  // install; failures are ignored on purpose - if the exe really is still
-  // locked, Setup reports that itself rather than us guessing here.
+  // Versions <= 0.1.3 ran the exe as a background service, which would hold
+  // the file we are about to replace. Restart Manager cannot close it - it is
+  // windowless - so stop the task first, then the process. Both are no-ops on
+  // a clean install, and failures are ignored: if the exe really is locked,
+  // Setup reports that itself rather than us guessing here.
   Exec(ExpandConstant('{sys}\schtasks.exe'), '/End /TN "LoginMonitorMcp"',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM windows-login-monitor-mcp.exe /F',
        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-end;
-
-procedure InitializeWizard;
-begin
-  HostnamePage := CreateInputQueryPage(wpSelectDir,
-    'Public hostname',
-    'Where will this MCP be reachable?',
-    'You host the server locally; you choose how to expose it - Cloudflare Tunnel, Tailscale Funnel, ngrok, Caddy + DDNS, anything that proxies HTTPS to 127.0.0.1:8765.' + #13#10 +
-    'Enter the public hostname your tunnel/proxy will use. Leave blank to keep the current setting on an upgrade, or for local-only on a first install (you can edit .env later).');
-  HostnamePage.Add('Public hostname (e.g. mcp.example.com):', False);
-  HostnamePage.Values[0] := '';
-end;
-
-function GetPublicHost(Param: string): string;
-begin
-  if Assigned(HostnamePage) then
-    Result := Trim(HostnamePage.Values[0])
-  else
-    Result := '';
 end;

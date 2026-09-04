@@ -23,24 +23,25 @@ Produces:
 | File | What |
 |---|---|
 | `dist\windows-login-monitor-mcp.exe` | The bundled MCP server (Python + deps frozen by PyInstaller, ~22 MB) |
-| `dist\WindowsLoginMonitorMcp-Setup-<ver>.exe` | The Inno Setup installer that drops the exe, prompts for hostname, generates a token, registers the scheduled task, and adds the user to Event Log Readers (~24 MB) |
+| `dist\WindowsLoginMonitorMcp-Setup-<ver>.exe` | The Inno Setup installer: drops the exe, adds the user to Event Log Readers, clears out anything a pre-0.1.4 install left (~24 MB) |
 | (printed) SHA256 of the installer | Paste into the winget manifest |
 
 ## What the installer does
 
-1. Asks for the **public hostname** the user's own tunnel/proxy will expose (e.g. `mcp.example.com`) — optional; blank means local-only.
-2. Copies `windows-login-monitor-mcp.exe` (the full OAuth 2.1 MCP server, frozen) to `C:\Program Files\WindowsLoginMonitorMcp\`.
-3. Generates a 256-bit **owner key**, writes `.env` with `WLM_MCP_OWNER_KEY`, `WLM_MCP_PUBLIC_URL`, host bind settings. `.env` is created with inheritance broken and an ACL of SYSTEM + Administrators + the installing user *before* the key is written to it — files under `Program Files` otherwise inherit read access for `BUILTIN\Users`, i.e. every local account.
-4. Adds the installing user to the local **Event Log Readers** group.
-5. Registers a scheduled task `LoginMonitorMcp` that starts the exe at logon, restarts on failure.
-6. Starts the server now.
-7. Deletes any `FIRST-RUN.txt` left by 0.1.0 or earlier, then (optional post-install checkbox) runs `Show-OwnerKey.ps1`, which prints the owner key + connector setup hints to a console.
+1. Copies `windows-login-monitor-mcp.exe` to `C:\Program Files\WindowsLoginMonitorMcp\`.
+2. Adds the installing user to the local **Event Log Readers** group, which is
+   what `wlm_get_recent_logons` needs to read the Security log.
+3. Removes anything a pre-0.1.4 install left behind: the `LoginMonitorMcp`
+   scheduled task, `.env` (which held the owner key), and `FIRST-RUN.txt`.
+4. Prints the line that registers the server with an MCP client.
 
-The key is shown on screen, never written to a second file: through 0.1.0 the installer wrote it into `FIRST-RUN.txt`, which nothing read back and nothing cleaned up ([#2](https://github.com/dhanjit/windows-login-monitor/issues/2)). `Show-OwnerKey.ps1` reads `.env` and can be re-run at any time as the installing user or an admin.
+That is the whole install. The server speaks stdio — the client starts it — so
+there is no key to generate, no service to register and no port to open. Those
+existed up to 0.1.3, when this package also shipped an HTTP server with its own
+OAuth; the machine's remote MCP door now belongs to
+[dhanjit/blackreach](https://github.com/dhanjit/blackreach) instead.
 
-The owner key is the OAuth `/authorize` gate — the operator's secret. Each OAuth client (Claude.ai, Claude Code, etc.) self-registers via [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) DCR, gets its own scoped access + refresh tokens via the authorization-code + PKCE flow, and refreshes silently.
-
-`winget uninstall Dhanjit.WindowsLoginMonitorMcp` reverses all of that.
+`winget uninstall Dhanjit.WindowsLoginMonitorMcp` reverses all of it.
 
 ## Cut a release
 
@@ -95,8 +96,8 @@ Expect a few days for the automated review bot and a human to approve. Once merg
 
 For 0.1.1, 0.2.0, etc.:
 
-1. `.\build\build.ps1 -Version 0.1.1` — produces a new installer + SHA256.
-2. Tag, push, create GitHub Release with the new installer.
+1. `.\build\build.ps1 -Version 0.1.1` locally if you want to test the installer first.
+2. Tag and push; the Release workflow builds and publishes. Take the SHA256 from the release body it writes, and only edit the notes once it has finished.
 3. Copy `build\manifests\0.1.0\` to `build\manifests\0.1.1\` and bump `PackageVersion`, `InstallerUrl`, `InstallerSha256`.
 4. Submit another PR (separate version folder in winget-pkgs).
 

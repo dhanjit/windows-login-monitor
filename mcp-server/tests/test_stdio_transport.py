@@ -86,25 +86,3 @@ def test_lists_the_same_tools_over_stdio(stdio_server):
         "wlm_get_login_log", "wlm_get_recent_logons", "wlm_check_phone_home",
         "wlm_send_phone_alert", "wlm_get_monitor_status",
     }
-
-
-def test_http_still_refuses_to_start_without_a_key():
-    """The gate stays on the path that has a listener."""
-    proc = subprocess.run(
-        [sys.executable, str(SERVER)], env=_env_without_key(), text=True,
-        capture_output=True, timeout=60, cwd=str(SERVER.parent),
-    )
-    assert proc.returncode != 0
-    assert "WLM_MCP_OWNER_KEY" in (proc.stderr + proc.stdout)
-
-
-@pytest.mark.parametrize("argv,env,expected", [
-    (["server.py", "--stdio"], {}, True),
-    (["server.py"], {"WLM_MCP_TRANSPORT": "stdio"}, True),
-    (["server.py"], {"WLM_MCP_TRANSPORT": "  STDIO  "}, True),
-    (["server.py"], {"WLM_MCP_TRANSPORT": "http"}, False),
-    (["server.py"], {}, False),
-])
-def test_transport_selection(argv, env, expected):
-    import server
-    assert server.use_stdio(argv, env) is expected

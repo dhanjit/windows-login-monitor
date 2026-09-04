@@ -8,34 +8,17 @@ from PyInstaller.utils.hooks import collect_all
 
 # mcp + its sub-packages have a lot of dynamic imports - pull everything in.
 mcp_datas, mcp_binaries, mcp_hidden = collect_all("mcp")
-uvicorn_datas, uvicorn_binaries, uvicorn_hidden = collect_all("uvicorn")
 
 block_cipher = None
 
 a = Analysis(
     ["..\\mcp-server\\server.py"],
-    pathex=["..\\mcp-server"],   # so `from auth_provider import ...` resolves
-    binaries=mcp_binaries + uvicorn_binaries,
-    datas=mcp_datas + uvicorn_datas,
+    pathex=["..\\mcp-server"],
+    binaries=mcp_binaries,
+    datas=mcp_datas,
     hiddenimports=[
         *mcp_hidden,
-        *uvicorn_hidden,
-        "auth_provider",
-        "starlette.applications",
-        "starlette.middleware.base",
-        "starlette.requests",
-        "starlette.responses",
-        "starlette.routing",
         "httpx",
-        "dotenv",
-        # uvicorn protocol implementations
-        "uvicorn.lifespan.on",
-        "uvicorn.protocols.http.h11_impl",
-        "uvicorn.protocols.http.httptools_impl",
-        "uvicorn.protocols.websockets.wsproto_impl",
-        "uvicorn.protocols.websockets.websockets_impl",
-        "uvicorn.loops.asyncio",
-        "uvicorn.loops.auto",
     ],
     hookspath=[],
     hooksconfig={},
@@ -63,7 +46,11 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    # MUST stay True. A windowed PyInstaller build gives the process no usable
+    # stdout, and stdio is the only transport this server has. The old
+    # windowless build existed because it ran as a background service; nothing
+    # runs it that way now, and clients spawn it with the window hidden anyway.
+    console=True,
     disable_windowed_traceback=False,
     target_arch=None,
     codesign_identity=None,
