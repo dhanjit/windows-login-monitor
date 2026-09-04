@@ -1,0 +1,6 @@
+# Line endings are LF in the object store and in every working tree, on every
+# platform. This travels with the clone; core.autocrlf does not.
+* text=auto eol=lf
+
+# Windows PowerShell, matching the convention set in the senses repo.
+*.ps1 text eol=crlf

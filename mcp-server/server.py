@@ -273,8 +273,26 @@ def _render_form(action_url: str, error: str | None = None) -> str:
     )
 
 
+def use_stdio(argv: Optional[list[str]] = None, env: Optional[dict] = None) -> bool:
+    """True when the client spawns us and talks over stdin/stdout.
+
+    stdio has no listener, so nothing can reach the server except the process
+    that started it — the OS is the access control. None of the OAuth machinery
+    applies, and requiring an owner key there would gate a door that isn't
+    there."""
+    argv = sys.argv if argv is None else argv
+    env = os.environ if env is None else env
+    return "--stdio" in argv or env.get("WLM_MCP_TRANSPORT", "").strip().lower() == "stdio"
+
+
+STDIO = use_stdio()
+
 _state_file = _state_dir() / "auth_state.json"
-oauth_provider = SimpleOAuthProvider(owner_key=OWNER_KEY, state_file=_state_file) if OWNER_KEY else None
+oauth_provider = (
+    SimpleOAuthProvider(owner_key=OWNER_KEY, state_file=_state_file)
+    if OWNER_KEY and not STDIO
+    else None
+)
 
 mcp_kwargs: dict = dict(
     transport_security=TransportSecuritySettings(
@@ -590,6 +608,13 @@ def build_app() -> Starlette:
 
 
 def main() -> None:
+    if STDIO:
+        # stdout carries JSON-RPC frames: no log redirect, no banner, nothing
+        # else may write there. stderr is left alone so the client can surface
+        # our errors in its own logs.
+        mcp.run(transport="stdio")
+        return
+
     # The frozen exe is built windowless (no console), so stdout/stderr have
     # nowhere to go. Route them to a log file in the user-writable state dir
     # before anything prints — keeps uvicorn logs and tracebacks recoverable.
