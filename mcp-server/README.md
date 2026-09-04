@@ -170,3 +170,5 @@ curl.exe -i -X POST https://<your-hostname>/mcp `
 - DNS-rebinding protection is on; your public hostname must be in `WLM_MCP_ALLOWED_HOSTS`.
 - `wlm_send_phone_alert` lets any authorized client push notifications to your phone. That's intentional, but worth knowing.
 - Server runs as your user at Limited run-level (not admin).
+- The key is stored in `.env` and nowhere else. The installer breaks inheritance on that file and restricts it to SYSTEM + Administrators + the installing user — anything under `Program Files` otherwise inherits read access for `BUILTIN\Users`, i.e. every local account. Editing it by hand needs an elevated editor.
+- `Show-OwnerKey.ps1`, next to the exe, prints the key to a console on demand. Installs of 0.1.0 and earlier also wrote it to `FIRST-RUN.txt`, which nothing read back and nothing cleaned up ([#2](https://github.com/dhanjit/windows-login-monitor/issues/2)); upgrading deletes that file.
