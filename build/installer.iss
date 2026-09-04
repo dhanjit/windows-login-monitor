@@ -32,6 +32,14 @@ MinVersion=10.0.17763
 WizardStyle=modern
 DisableDirPage=auto
 DisableProgramGroupPage=yes
+; The server is windowless, so Restart Manager has no window or console to
+; close gracefully and gives up ("Some applications could not be shut down").
+; Under /SUPPRESSMSGBOXES that box defaults to Abort, so every silent upgrade
+; over a running install failed. Terminate instead, and do not let Setup
+; relaunch the exe directly - setup-helper.ps1 starts it via the task, as the
+; right user at the right run level.
+CloseApplications=force
+RestartApplications=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -70,6 +78,22 @@ Type: files; Name: "{app}\FIRST-RUN.txt"
 [Code]
 var
   HostnamePage: TInputQueryWizardPage;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+  // Runs before any file is replaced. Stop the task first, so its restart
+  // policy cannot respawn the server between the kill and the copy, then make
+  // sure no instance is left holding the exe. Both are no-ops on a first
+  // install; failures are ignored on purpose - if the exe really is still
+  // locked, Setup reports that itself rather than us guessing here.
+  Exec(ExpandConstant('{sys}\schtasks.exe'), '/End /TN "LoginMonitorMcp"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM windows-login-monitor-mcp.exe /F',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
 
 procedure InitializeWizard;
 begin
