@@ -1,4 +1,8 @@
-mcp[cli]>=1.27
+# <2: SDK 2.x renamed FastMCP to MCPServer and changed the auth APIs this
+# server builds on (mcp.server.fastmcp, OAuthAuthorizationServerProvider).
+# Migrating is its own piece of work - until then an uncapped range installs
+# 2.x and the server fails to import.
+mcp[cli]>=1.27,<2
 httpx>=0.27
 uvicorn>=0.30
 python-dotenv>=1.0

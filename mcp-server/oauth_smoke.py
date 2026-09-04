@@ -6,14 +6,16 @@ import os
 import secrets
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import httpx
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).with_name(".env"))
 OWNER_KEY = os.environ["WLM_MCP_OWNER_KEY"]
-BASE = "http://127.0.0.1:8765"
+# Override to smoke-test a server on another port without disturbing an
+# installed one already holding 8765.
+BASE = os.environ.get("WLM_MCP_SMOKE_BASE", "http://127.0.0.1:8765").rstrip("/")
 
 
 def b64url(b: bytes) -> str:
@@ -88,17 +90,19 @@ def main() -> int:
         print(f"[5a] GET /authorize -> {r.status_code} (expect 200 + form)")
         assert r.status_code == 200 and "owner_key" in r.text
 
-        r = c.post(f"{BASE}/authorize",
-                   data={"owner_key": OWNER_KEY, "original_url": auth_url})
+        # Browser-accurate: the form's action is the /authorize path+query, so
+        # the POST carries the OAuth params itself (no hidden original_url).
+        r = c.post(auth_url, data={"owner_key": OWNER_KEY})
         print(f"[5b] POST /authorize (correct key) -> {r.status_code}")
         assert r.status_code == 303, r.text
         # Cookie from the 303 carries the session
         session_cookies = r.cookies
         location = r.headers["location"]
-        assert location.startswith(BASE), location
+        # Relative on purpose - scheme-agnostic, so it survives a TLS proxy.
+        assert location == urlparse(auth_url).path + "?" + urlparse(auth_url).query, location
 
         # 5c. Follow the redirect with the cookie — SDK handler runs, returns redirect to callback?code=...
-        r = c.get(location, cookies=session_cookies)
+        r = c.get(urljoin(BASE, location), cookies=session_cookies)
         print(f"[5c] follow auth redirect -> {r.status_code}")
         assert r.status_code in (302, 303), r.text
         cb = r.headers["location"]
@@ -167,7 +171,7 @@ def main() -> int:
 
         # 11. Wrong owner key gets rejected — use a fresh client so no stale session cookie.
         with httpx.Client(timeout=15.0, follow_redirects=False) as c2:
-            r = c2.post(f"{BASE}/authorize", data={"owner_key": "WRONG", "original_url": auth_url})
+            r = c2.post(auth_url, data={"owner_key": "WRONG"})
         print(f"[11] /authorize with WRONG key (fresh client) -> {r.status_code} (expect 401)")
         assert r.status_code == 401, r.text
 
