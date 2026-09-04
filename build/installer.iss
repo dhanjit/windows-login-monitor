@@ -40,6 +40,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "..\dist\windows-login-monitor-mcp.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "setup-helper.ps1";                  DestDir: "{app}"; Flags: ignoreversion
 Source: "uninstall-helper.ps1";              DestDir: "{app}"; Flags: ignoreversion
+Source: "Show-OwnerKey.ps1";                 DestDir: "{app}"; Flags: ignoreversion
 
 [Run]
 Filename: "powershell.exe"; \
@@ -47,9 +48,11 @@ Filename: "powershell.exe"; \
     StatusMsg: "Generating token, registering scheduled task..."; \
     Flags: runhidden waituntilterminated
 
-Filename: "notepad.exe"; \
-    Parameters: """{app}\FIRST-RUN.txt"""; \
-    Description: "Show the bearer token and connector setup info"; \
+; Shows the key on screen, read from .env. Deliberately not a file: a second
+; cleartext copy under {app} would be readable by every local account.
+Filename: "powershell.exe"; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Show-OwnerKey.ps1"" -InstallDir ""{app}"""; \
+    Description: "Show the owner key and connector setup info"; \
     Flags: postinstall skipifsilent nowait
 
 [UninstallRun]
@@ -61,6 +64,7 @@ Filename: "powershell.exe"; \
 Type: files; Name: "{app}\.env"
 Type: files; Name: "{app}\server.log"
 Type: files; Name: "{app}\server.err.log"
+; No longer written; still deleted, to clean up installs of 0.1.0 and earlier.
 Type: files; Name: "{app}\FIRST-RUN.txt"
 
 [Code]

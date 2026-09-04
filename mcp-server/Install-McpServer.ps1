@@ -13,6 +13,44 @@ Write-Host ""
 Write-Host "=== Windows Login Monitor MCP Server Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
+# Lock a secrets file to SYSTEM + Administrators + the installing user.
+# C:\Scripts inherits the C:\ ACL, which grants BUILTIN\Users read - the owner
+# key must not be readable by every local account. Creates the file first, so
+# the ACL is in place *before* a secret is written into it. The user needs an
+# ACE of their own: the scheduled task runs non-elevated and reads .env with the
+# limited token, where Administrators does not apply.
+function Protect-SecretFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$OwnerAccount
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType File -Path $Path -Force | Out-Null
+    }
+    # Well-known SIDs, not names: "BUILTIN\Administrators" is localised.
+    $ids = @(
+        (New-Object System.Security.Principal.SecurityIdentifier "S-1-5-18"),     # LOCAL SYSTEM
+        (New-Object System.Security.Principal.SecurityIdentifier "S-1-5-32-544")  # Administrators
+    )
+    try {
+        $ids += (New-Object System.Security.Principal.NTAccount $OwnerAccount).Translate(
+            [System.Security.Principal.SecurityIdentifier])
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)   # stop inheriting; drop inherited ACEs
+        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+        foreach ($id in $ids) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $id,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow)))
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        # Never fall through to writing a secret into a world-readable file.
+        throw "Could not restrict permissions on $Path ($($_.Exception.Message)). Aborting so the owner key is not left readable by all local users."
+    }
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal] `
     [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
         [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -20,6 +58,8 @@ if (-not $isAdmin) {
     Write-Host "ERROR: must run as Administrator." -ForegroundColor Red
     exit 1
 }
+
+$me = "$env:USERDOMAIN\$env:USERNAME"
 
 # --- Locate Python ---
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -91,11 +131,13 @@ if ($publicHost) {
     $envLines += "WLM_MCP_HOST=0.0.0.0"
     $envLines += "WLM_MCP_ALLOWED_HOSTS=$publicHost"
 }
+# ACL first, contents second: the key must never exist in a world-readable file,
+# not even for the moment between creation and write.
+Protect-SecretFile -Path $envFile -OwnerAccount $me
 [System.IO.File]::WriteAllText($envFile, ($envLines -join "`n") + "`n", [System.Text.UTF8Encoding]::new($false))
-Write-Host "Wrote $envFile" -ForegroundColor Green
+Write-Host "Wrote $envFile (readable only by SYSTEM, Administrators and $me)" -ForegroundColor Green
 
 # --- Add current user to Event Log Readers (so Get-WinEvent on Security works without admin) ---
-$me = "$env:USERDOMAIN\$env:USERNAME"
 $grp = "Event Log Readers"
 try {
     $member = Get-LocalGroupMember -Group $grp -Member $me -ErrorAction SilentlyContinue
