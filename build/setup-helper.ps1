@@ -16,6 +16,44 @@ $me       = "$env:USERDOMAIN\$env:USERNAME"
 
 Write-Host "Configuring Windows Login Monitor MCP for $me"
 
+# Lock a secrets file to SYSTEM + Administrators + the installing user.
+# Anything under Program Files inherits an ACE granting BUILTIN\Users read, so
+# the owner key would otherwise be readable by every local account. Creates the
+# file first, so the ACL is in place *before* a secret is written into it.
+# The user needs an ACE of their own: the scheduled task runs non-elevated and
+# reads .env with the limited token, where Administrators does not apply.
+function Protect-SecretFile {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$OwnerAccount
+    )
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType File -Path $Path -Force | Out-Null
+    }
+    # Well-known SIDs, not names: "BUILTIN\Administrators" is localised.
+    $ids = @(
+        (New-Object System.Security.Principal.SecurityIdentifier "S-1-5-18"),     # LOCAL SYSTEM
+        (New-Object System.Security.Principal.SecurityIdentifier "S-1-5-32-544")  # Administrators
+    )
+    try {
+        $ids += (New-Object System.Security.Principal.NTAccount $OwnerAccount).Translate(
+            [System.Security.Principal.SecurityIdentifier])
+        $acl = Get-Acl -LiteralPath $Path
+        $acl.SetAccessRuleProtection($true, $false)   # stop inheriting; drop inherited ACEs
+        foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
+        foreach ($id in $ids) {
+            $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+                $id,
+                [System.Security.AccessControl.FileSystemRights]::FullControl,
+                [System.Security.AccessControl.AccessControlType]::Allow)))
+        }
+        Set-Acl -LiteralPath $Path -AclObject $acl
+    } catch {
+        # Never fall through to writing a secret into a world-readable file.
+        throw "Could not restrict permissions on $Path ($($_.Exception.Message)). Aborting so the owner key is not left readable by all local users."
+    }
+}
+
 # --- 1. Reuse or generate owner key (accept legacy WLM_MCP_TOKEN too) ---
 $ownerKey = $null
 if (Test-Path $envFile) {
@@ -34,6 +72,9 @@ if (-not $ownerKey) {
 }
 
 # --- 2. Write .env (no BOM; python-dotenv chokes on it) ---
+# ACL first, contents second: the key must never exist in a world-readable file,
+# not even for the moment between creation and write.
+Protect-SecretFile -Path $envFile -OwnerAccount $me
 $publicUrl = if ($PublicHost) { "https://$PublicHost" } else { "http://127.0.0.1:8765" }
 $envLines = @(
     "WLM_MCP_OWNER_KEY=$ownerKey",
@@ -120,42 +161,16 @@ if (-not $allOk) {
     Write-Host "  - Last error:  $probeError"
 }
 
-# --- 6. Drop a token-info file for the user to read after install ---
-$infoFile = Join-Path $InstallDir "FIRST-RUN.txt"
-$mcpUrl   = if ($PublicHost) { "https://$PublicHost/mcp" } else { "https://<your-hostname>/mcp" }
-@"
-Windows Login Monitor MCP - installed.
+# --- 6. Remove FIRST-RUN.txt from installs of 0.1.0 and earlier ---
+# It held a second cleartext copy of the owner key, nothing ever read it back,
+# and it inherited Program Files' ACL - readable by every local account.
+# The key now lives in .env only; Show-OwnerKey.ps1 displays it on demand.
+$legacyInfoFile = Join-Path $InstallDir "FIRST-RUN.txt"
+if (Test-Path -LiteralPath $legacyInfoFile) {
+    Remove-Item -LiteralPath $legacyInfoFile -Force -ErrorAction SilentlyContinue
+    Write-Host "Removed legacy $legacyInfoFile (it stored the owner key in cleartext)."
+}
 
-OWNER KEY (master password - keep secret):
-  $ownerKey
-
-The owner key only authenticates YOU at the OAuth /authorize step.
-Each client (Claude.ai, Claude Code, Cursor, etc.) gets its own scoped
-access + refresh token after you approve.
-
-Local endpoint:    http://127.0.0.1:8765/mcp
-Health probe:      http://127.0.0.1:8765/healthz
-$(if ($PublicHost) { "Public endpoint:   https://$PublicHost/mcp" })
-
-NEXT STEP: expose the local endpoint to your agent.
-Pick whatever you already use:
-  - Cloudflare Tunnel: add ingress hostname -> http://host.docker.internal:8765
-                       (Docker cloudflared) or http://127.0.0.1:8765 (native)
-  - Tailscale Funnel:  tailscale funnel 8765
-  - ngrok:             ngrok http 8765
-  - Caddy / nginx + DDNS or static IP
-  - Nothing - works as-is for Claude Code on this PC.
-
-Then in your client (e.g. Claude.ai Custom Connector):
-  URL: $mcpUrl
-  Tap Connect; the browser opens the authorize page.
-  Paste the OWNER KEY above and submit. Done.
-
-Runs as:        scheduled task '$taskName', windowless, autostart at logon.
-                No console window - nothing to close by mistake.
-Log file:       %LOCALAPPDATA%\WindowsLoginMonitorMcp\server.log
-Re-show this:   notepad "$infoFile"
-"@ | Set-Content -Path $infoFile -Encoding UTF8
-
+# Console only - this output is not captured to a file anywhere.
 Write-Host "Owner key: $ownerKey"
-Write-Host "See $infoFile for full details."
+Write-Host "Show it again: powershell -File `"$InstallDir\Show-OwnerKey.ps1`""

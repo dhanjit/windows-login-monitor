@@ -30,11 +30,13 @@ Produces:
 
 1. Asks for the **public hostname** the user's own tunnel/proxy will expose (e.g. `mcp.example.com`) — optional; blank means local-only.
 2. Copies `windows-login-monitor-mcp.exe` (the full OAuth 2.1 MCP server, frozen) to `C:\Program Files\WindowsLoginMonitorMcp\`.
-3. Generates a 256-bit **owner key**, writes `.env` with `WLM_MCP_OWNER_KEY`, `WLM_MCP_PUBLIC_URL`, host bind settings.
+3. Generates a 256-bit **owner key**, writes `.env` with `WLM_MCP_OWNER_KEY`, `WLM_MCP_PUBLIC_URL`, host bind settings. `.env` is created with inheritance broken and an ACL of SYSTEM + Administrators + the installing user *before* the key is written to it — files under `Program Files` otherwise inherit read access for `BUILTIN\Users`, i.e. every local account.
 4. Adds the installing user to the local **Event Log Readers** group.
 5. Registers a scheduled task `LoginMonitorMcp` that starts the exe at logon, restarts on failure.
 6. Starts the server now.
-7. Opens `FIRST-RUN.txt` showing the owner key + connector setup hints.
+7. Deletes any `FIRST-RUN.txt` left by 0.1.0 or earlier, then (optional post-install checkbox) runs `Show-OwnerKey.ps1`, which prints the owner key + connector setup hints to a console.
+
+The key is shown on screen, never written to a second file: through 0.1.0 the installer wrote it into `FIRST-RUN.txt`, which nothing read back and nothing cleaned up ([#2](https://github.com/dhanjit/windows-login-monitor/issues/2)). `Show-OwnerKey.ps1` reads `.env` and can be re-run at any time as the installing user or an admin.
 
 The owner key is the OAuth `/authorize` gate — the operator's secret. Each OAuth client (Claude.ai, Claude Code, etc.) self-registers via [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) DCR, gets its own scoped access + refresh tokens via the authorization-code + PKCE flow, and refreshes silently.
 
