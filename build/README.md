@@ -44,15 +44,21 @@ The owner key is the OAuth `/authorize` gate — the operator's secret. Each OAu
 
 ## Cut a release
 
+**Pushing the tag is what publishes.** `.github/workflows/release.yml` fires on `v*`, rebuilds the installer on a clean runner from the tagged source, and attaches it to the release.
+
 ```powershell
 $v = "0.1.0"
-.\build\build.ps1 -Version $v
-
-# Tag, push, and create the GitHub Release with the installer attached
 git tag "v$v"
-git push origin "v$v"
-gh release create "v$v" "dist\WindowsLoginMonitorMcp-Setup-$v.exe" --notes "..."
+git push origin "v$v"          # the Release workflow builds and publishes
+
+# Wait for it to finish, then take the SHA256 from the release body
+gh run watch (gh run list --workflow Release --limit 1 --json databaseId -q '.[].databaseId')
+gh release edit "v$v" --notes-file notes.md    # only after the workflow is done
 ```
+
+Do **not** run `gh release create` with a locally built installer. The workflow uses `softprops/action-gh-release`, which overwrites both the asset and the release body — a manual upload races it, and the loser is whichever finished first. That is how v0.1.2 shipped with a manifest hash for a binary that no longer existed: the local build was verified, then replaced by the CI build seconds later.
+
+`.\build\build.ps1 -Version $v` locally is for testing the installer before tagging, not for producing the published artifact.
 
 ## Refresh the winget manifest
 
