@@ -1,0 +1,17 @@
+PackageIdentifier: Dhanjit.WindowsLoginMonitorMcp
+PackageVersion: 0.1.1
+InstallerLocale: en-US
+InstallerType: inno
+Scope: machine
+MinimumOSVersion: 10.0.17763.0
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/dhanjit/windows-login-monitor/releases/download/v0.1.1/WindowsLoginMonitorMcp-Setup-0.1.1.exe
+    InstallerSha256: FB81FD837B82E00F0DD621197E48F0CB475DDAD5095DD86DC991B800E843628E
+ManifestType: installer
+ManifestVersion: 1.6.0
