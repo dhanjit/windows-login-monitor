@@ -44,10 +44,10 @@ def test_get_authorize_without_cookie_shows_form(app_factory):
 def test_post_with_correct_owner_key_sets_cookie_and_redirects(app_factory):
     app, _ = app_factory("right-key")
     client = TestClient(app, follow_redirects=False)
-    r = client.post("/authorize", data={
-        "owner_key": "right-key",
-        "original_url": "/authorize?client_id=abc&response_type=code",
-    })
+    # The OAuth params ride the form's action, not a hidden field, so a browser
+    # POSTs to /authorize?<query> and the gate redirects back to that same URL.
+    r = client.post("/authorize?client_id=abc&response_type=code",
+                    data={"owner_key": "right-key"})
     assert r.status_code == 303
     assert r.headers["location"] == "/authorize?client_id=abc&response_type=code"
     # session cookie was set
@@ -57,11 +57,11 @@ def test_post_with_correct_owner_key_sets_cookie_and_redirects(app_factory):
 def test_post_with_wrong_owner_key_returns_401(app_factory):
     app, _ = app_factory("right-key")
     client = TestClient(app)
-    r = client.post("/authorize", data={
-        "owner_key": "wrong-key",
-        "original_url": "/authorize?client_id=abc",
-    })
+    r = client.post("/authorize?client_id=abc", data={"owner_key": "wrong-key"})
     assert r.status_code == 401
+    # Re-rendered form keeps the OAuth params in its action - dropping them is
+    # what broke strict clients before 509c6c5.
+    assert 'action="/authorize?client_id=abc"' in r.text
 
 
 def test_get_with_valid_session_cookie_passes_through(app_factory):
