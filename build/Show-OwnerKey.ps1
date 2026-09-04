@@ -10,9 +10,29 @@
 param([string]$InstallDir = $PSScriptRoot)
 
 $envFile = Join-Path $InstallDir ".env"
+$exe     = Join-Path $InstallDir "windows-login-monitor-mcp.exe"
+
+# Local mode: the client spawns the exe over stdio, so there is no key to show.
+# Show how to register it instead - that is what the user actually needs.
+function Show-LocalMode {
+    Write-Host ""
+    Write-Host "=== Windows Login Monitor MCP - local mode ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "No owner key: there is no listener, so there is nothing to authenticate."
+    Write-Host "Your MCP client starts the server on demand over stdio."
+    Write-Host ""
+    Write-Host "Register it:" -ForegroundColor Yellow
+    Write-Host "  claude mcp add windows-login-monitor -- `"$exe`" --stdio" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Other clients: run the exe with --stdio as the command, no arguments beyond that."
+    Write-Host "To expose it remotely instead, re-run the installer and give a public hostname;"
+    Write-Host "that mode generates an owner key and registers a background service."
+    Read-Host "`nPress Enter to close"
+}
 
 if (-not (Test-Path -LiteralPath $envFile)) {
-    Write-Host "No .env in $InstallDir - the MCP does not look installed here." -ForegroundColor Red
+    if (Test-Path -LiteralPath $exe) { Show-LocalMode; exit 0 }
+    Write-Host "No .env and no exe in $InstallDir - the MCP does not look installed here." -ForegroundColor Red
     Write-Host "Re-run the installer, or point this script at the install directory:" -ForegroundColor Yellow
     Write-Host "  .\Show-OwnerKey.ps1 -InstallDir 'C:\Program Files\WindowsLoginMonitorMcp'"
     Read-Host "`nPress Enter to close"
@@ -35,9 +55,9 @@ foreach ($name in @("WLM_MCP_OWNER_KEY", "WLM_MCP_TOKEN")) {   # legacy name sti
     if ($m.Success) { $ownerKey = $m.Groups[1].Value; break }
 }
 if (-not $ownerKey) {
-    Write-Host "No owner key in $envFile. The server will refuse to start without one." -ForegroundColor Red
-    Read-Host "`nPress Enter to close"
-    exit 1
+    # .env exists but carries only non-secret config - that is local mode.
+    Show-LocalMode
+    exit 0
 }
 
 $publicUrl  = ([regex]::Match($raw, 'WLM_MCP_PUBLIC_URL\s*=\s*(\S+)')).Groups[1].Value

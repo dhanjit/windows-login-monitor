@@ -49,7 +49,19 @@ login.log     log (4624 / 4801)    ntfy.sh
 | `wlm_send_phone_alert` | POST a notification to the ntfy topic | `body`, `title`, `priority`, `tags` |
 | `wlm_get_monitor_status` | Snapshot: task / audit policy / config / log | none |
 
-## How auth works
+## Two modes, and only one of them has a password
+
+| | Local (default) | Remote |
+|---|---|---|
+| Transport | stdio — your client starts the exe | HTTP on a port, behind your tunnel |
+| Reachable by | only the process that spawned it | anyone who finds the URL |
+| Owner key | **none** | required — it gates `/authorize` |
+| Background service | none | scheduled task at logon |
+| Register with | `claude mcp add windows-login-monitor -- "<exe>" --stdio` | a URL in your MCP client |
+
+The installer picks local unless you give it a public hostname. Everything below about OAuth applies to remote mode; local mode has no authentication because it has nothing to authenticate — no port exists, and the OS already decides who may run the program.
+
+## How auth works (remote mode)
 
 The server is a **single-owner OAuth authorization server**. The flow:
 
@@ -90,9 +102,10 @@ cd mcp-server
 ### Option D: just run it (dev)
 
 ```powershell
-echo "WLM_MCP_OWNER_KEY=$(python -c "import secrets;print(secrets.token_urlsafe(32))")" > .env
-.\.venv\Scripts\python.exe server.py
+.\.venv\Scripts\python.exe server.py --stdio
 ```
+
+Nothing to configure: stdio has no listener, so there is no key. Drop `--stdio` to run the HTTP server instead, which does need `WLM_MCP_OWNER_KEY` set.
 
 ## Expose it (your stack, your choice)
 
@@ -164,7 +177,8 @@ curl.exe -i -X POST https://<your-hostname>/mcp `
 
 ## Security notes
 
-- **Owner key = master password.** Treat as such. Rotate by editing `.env` and restarting; existing OAuth tokens become invalid on restart anyway (in-memory).
+- **Local mode has no credential at all.** No key, no `.env` secret, no listening port, no service. If you never expose this, none of the rest of this section applies to you.
+- **Owner key = master password**, in remote mode. Treat as such. Rotate by editing `.env` and restarting (elevated — see below); existing OAuth tokens become invalid on restart anyway (in-memory).
 - Access tokens live 1 hour; refresh tokens 30 days. Both rotate on every refresh.
 - Default bind is loopback only — nothing on your LAN can reach the server unless you change `WLM_MCP_HOST`.
 - DNS-rebinding protection is on; your public hostname must be in `WLM_MCP_ALLOWED_HOSTS`.
