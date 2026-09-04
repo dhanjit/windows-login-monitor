@@ -1,9 +1,13 @@
 # Windows Login Monitor — MCP Server
 
-A local-first MCP server that exposes this PC's login monitor to AI agents.
-Speaks **OAuth 2.1** per the [MCP 2025-06-18 Authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization), so any spec-compliant client (Claude.ai, Claude Code, Cursor, etc.) can connect.
+A local MCP server that exposes this PC's login monitor to AI agents over
+**stdio**: your client starts the executable and talks to it on stdin/stdout.
 
-**You host it. You expose it.** This package only ships the server — point any tunnel, reverse proxy, or VPN at `http://127.0.0.1:8765` and you're done.
+No port, no password, no background service. Anything that can run this program
+could already read the same event log directly, so there is nothing for it to
+authenticate. If you want these tools reachable from elsewhere, front them with
+a server of your own behind an authenticated edge — see
+[dhanjit/blackreach](https://github.com/dhanjit/blackreach).
 
 ## Supported Windows
 
@@ -18,19 +22,14 @@ Windows Server 2019/2022 should work but is not part of the test matrix. ARM64 W
 
 ```
 ┌──────────────────────────────────────┐
-│  Your stack: tunnel / proxy / VPN    │
-│  (Cloudflare Tunnel, ngrok,          │
-│   Tailscale Funnel, Caddy + DDNS…)   │
+│  Your MCP client (Claude Code, ...)  │
 └──────────────────┬───────────────────┘
-                   │
-            127.0.0.1:8765
-                   │
+                   │ spawns the process,
+                   │ JSON-RPC on stdin/stdout
    ┌───────────────▼────────────────┐
    │ windows-login-monitor-mcp.exe  │
-   │   FastMCP + OAuth 2.1          │
-   │   /.well-known/oauth-*         │
-   │   /authorize  /token  /register│
-   │   /mcp  (Bearer-protected)     │
+   │   FastMCP over stdio           │
+   │   no port, no key, no service  │
    └───────────────┬────────────────┘
                    │
    ┌───────────────┼───────────────┐
@@ -49,39 +48,16 @@ login.log     log (4624 / 4801)    ntfy.sh
 | `wlm_send_phone_alert` | POST a notification to the ntfy topic | `body`, `title`, `priority`, `tags` |
 | `wlm_get_monitor_status` | Snapshot: task / audit policy / config / log | none |
 
-## Two modes, and only one of them has a password
-
-| | Local (default) | Remote |
-|---|---|---|
-| Transport | stdio — your client starts the exe | HTTP on a port, behind your tunnel |
-| Reachable by | only the process that spawned it | anyone who finds the URL |
-| Owner key | **none** | required — it gates `/authorize` |
-| Background service | none | scheduled task at logon |
-| Register with | `claude mcp add windows-login-monitor -- "<exe>" --stdio` | a URL in your MCP client |
-
-The installer picks local unless you give it a public hostname. Everything below about OAuth applies to remote mode; local mode has no authentication because it has nothing to authenticate — no port exists, and the OS already decides who may run the program.
-
-## How auth works (remote mode)
-
-The server is a **single-owner OAuth authorization server**. The flow:
-
-1. Client (Claude.ai, Cursor, etc.) discovers the server via [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) at `/.well-known/oauth-protected-resource/mcp`.
-2. It registers itself via [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) Dynamic Client Registration — no pre-shared client_id needed.
-3. It redirects you to `/authorize`. You see a small form: *"enter the owner key"*.
-4. You paste your `WLM_MCP_OWNER_KEY` (generated at install, also in `.env`). The server sets a short-lived session cookie and issues an authorization code.
-5. Client exchanges the code for an access + refresh token (PKCE-protected) at `/token`. It then speaks bearer-token MCP and refreshes silently.
-
-The owner key only gates **the human step** at `/authorize` — it's never handed to clients. Each client gets its own opaque, scoped tokens we issue and validate locally. Tokens persist via `auth_state.json` (clients) plus in-memory state (codes / access / refresh).
-
 ## Install
 
-### Option A: download the installer from GitHub Releases (works today)
+### Option A: download the installer from GitHub Releases
 
 1. Go to [Releases](https://github.com/dhanjit/windows-login-monitor/releases/latest).
-2. Download `WindowsLoginMonitorMcp-Setup-<version>.exe`.
-3. Run it (it'll request admin via UAC).
+2. Download `WindowsLoginMonitorMcp-Setup-<version>.exe` and run it (it requests admin via UAC).
 
-The installer prompts for a public hostname (blank = local-only), generates an owner key, registers a logon scheduled task, adds you to **Event Log Readers**, and runs post-install health checks. Done in <30 s. No Python needed — the server is a self-contained bundled exe.
+The installer copies the exe, adds you to **Event Log Readers** so the tools can
+read the Security log, and prints the registration line. No Python needed — the
+server is a self-contained bundled exe.
 
 ### Option B: winget (once published)
 
@@ -89,100 +65,51 @@ The installer prompts for a public hostname (blank = local-only), generates an o
 winget install Dhanjit.WindowsLoginMonitorMcp
 ```
 
-Works after the manifest is accepted into [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs). Until then, use Option A — it installs the identical artifact.
-
 ### Option C: from source
 
 ```powershell
 cd mcp-server
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\Install-McpServer.ps1   # elevated; same end state as the installer
+.\.venv\Scripts\python.exe server.py     # that is the whole thing
 ```
 
-### Option D: just run it (dev)
+Nothing to configure: there is no `.env`, no key and no service. You will want
+to be in the local **Event Log Readers** group for `wlm_get_recent_logons`.
+
+## Register it with a client
 
 ```powershell
-.\.venv\Scripts\python.exe server.py --stdio
+claude mcp add windows-login-monitor -- "$env:ProgramFiles\WindowsLoginMonitorMcp\windows-login-monitor-mcp.exe"
 ```
 
-Nothing to configure: stdio has no listener, so there is no key. Drop `--stdio` to run the HTTP server instead, which does need `WLM_MCP_OWNER_KEY` set.
-
-## Expose it (your stack, your choice)
-
-The server binds to `127.0.0.1:8765` by default. To make it reachable from Claude.ai mobile or any remote agent, pick whatever you already have. Set `WLM_MCP_HOST=0.0.0.0` if your tunnel/proxy needs to reach you on the network bridge rather than loopback (e.g. a container).
-
-| Stack | Time-to-running | Why pick it |
-|---|---|---|
-| **Cloudflare Tunnel** | 5 min | Free, no port-forward, your own DNS. [Setup](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/). Add ingress `service: http://host.docker.internal:8765` (if cloudflared is in Docker) or `http://127.0.0.1:8765` (native). |
-| **Tailscale Funnel** | 3 min | One command — `tailscale funnel 8765`. Public HTTPS, uses your tailnet identity. |
-| **ngrok** | 1 min | `ngrok http 8765`. Quick & dirty; random subdomain on free tier. |
-| **Caddy + DDNS + port forward** | 30 min | Most DIY. Real domain, free Let's Encrypt cert, no third-party tunnel. |
-| **Nothing** | 0 min | If you only use Claude Code on the same PC, `claude mcp add` with `http://127.0.0.1:8765/mcp` works without any exposure. |
-
-**Whatever you pick:** put your public hostname in `WLM_MCP_PUBLIC_URL` and `WLM_MCP_ALLOWED_HOSTS` so OAuth metadata advertises the right URLs and the DNS-rebinding check passes.
-
-## Adding to clients
-
-Once the server is reachable at `https://<your-hostname>/mcp`, any OAuth-capable MCP client connects the same way:
-
-### Claude.ai (web/mobile) — requires Pro+ for custom connectors
-
-1. Settings → Connectors → Add custom connector
-2. URL: `https://<your-hostname>/mcp`
-3. Tap **Connect**. The browser opens the authorize page.
-4. Paste your **owner key** → submit. Claude is redirected back with a code; it exchanges it for tokens.
-
-### Claude Code
-
-```powershell
-claude mcp add --transport http windows-login-monitor https://<your-hostname>/mcp
-```
-
-It opens the authorize page in your browser on first use.
-
-### Cursor / Windsurf / generic MCP client
-
-Use the client's "remote MCP" / "HTTP MCP" config with URL `https://<your-hostname>/mcp`. Any client that follows the MCP 2025-06-18 spec discovers OAuth automatically.
+Any MCP client works the same way: use that executable as the command, with no
+arguments. From source, the command is your Python and `server.py`.
 
 ## Verify
 
 ```powershell
-# Discovery
-Invoke-RestMethod https://<your-hostname>/.well-known/oauth-protected-resource/mcp
-Invoke-RestMethod https://<your-hostname>/.well-known/oauth-authorization-server
-
-# 401 challenge — should include WWW-Authenticate with resource_metadata URL
-curl.exe -i -X POST https://<your-hostname>/mcp `
-    -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "{}"
-
-# Full OAuth + MCP roundtrip
-.venv\Scripts\python.exe oauth_smoke.py
+python build\stdio_smoke.py "$env:ProgramFiles\WindowsLoginMonitorMcp\windows-login-monitor-mcp.exe"
 ```
 
-## Configuration (`.env`)
-
-| Key | Purpose | Example |
-|---|---|---|
-| `WLM_MCP_OWNER_KEY` | **Required.** Operator's secret for the `/authorize` gate | 256-bit random string |
-| `WLM_MCP_PUBLIC_URL` | Issuer URL advertised in OAuth metadata | `https://mcp.example.com` |
-| `WLM_MCP_HOST` | Bind address (`0.0.0.0` if a Docker tunnel reaches you via the bridge) | `127.0.0.1` |
-| `WLM_MCP_PORT` | Listen port | `8765` |
-| `WLM_MCP_ALLOWED_HOSTS` | Comma-separated `Host:` headers to accept (besides loopback) | `mcp.example.com` |
-
-`auth_state.json` next to `.env` persists registered OAuth clients across restarts. Safe to delete; clients re-register on next connect.
+Speaks real MCP to the server and lists its tools. Useful mainly to prove a
+build works — a windowed build has no usable stdout and would fail here.
 
 ## Uninstall
 
-`winget uninstall Dhanjit.WindowsLoginMonitorMcp` removes everything the installer created (files, scheduled task, group membership).
+`winget uninstall Dhanjit.WindowsLoginMonitorMcp`, or Apps & features. Remove
+the client registration with `claude mcp remove windows-login-monitor`.
 
 ## Security notes
 
-- **Local mode has no credential at all.** No key, no `.env` secret, no listening port, no service. If you never expose this, none of the rest of this section applies to you.
-- **Owner key = master password**, in remote mode. Treat as such. Rotate by editing `.env` and restarting (elevated — see below); existing OAuth tokens become invalid on restart anyway (in-memory).
-- Access tokens live 1 hour; refresh tokens 30 days. Both rotate on every refresh.
-- Default bind is loopback only — nothing on your LAN can reach the server unless you change `WLM_MCP_HOST`.
-- DNS-rebinding protection is on; your public hostname must be in `WLM_MCP_ALLOWED_HOSTS`.
-- `wlm_send_phone_alert` lets any authorized client push notifications to your phone. That's intentional, but worth knowing.
-- Server runs as your user at Limited run-level (not admin).
-- The key is stored in `.env` and nowhere else. The installer breaks inheritance on that file and restricts it to SYSTEM + Administrators + the installing user — anything under `Program Files` otherwise inherits read access for `BUILTIN\Users`, i.e. every local account. Editing it by hand needs an elevated editor.
-- `Show-OwnerKey.ps1`, next to the exe, prints the key to a console on demand. Installs of 0.1.0 and earlier also wrote it to `FIRST-RUN.txt`, which nothing read back and nothing cleaned up ([#2](https://github.com/dhanjit/windows-login-monitor/issues/2)); upgrading deletes that file.
+- **There is no credential**, because there is nothing listening. The process is
+  started by whoever runs it, and the OS decides who that may be.
+- `wlm_get_recent_logons` needs Security-log access, which is why the installer
+  adds you to **Event Log Readers**. That membership outlives an uninstall of
+  this package only if you leave it; `uninstall-helper.ps1` removes it.
+- `wlm_send_phone_alert` lets any client that can reach this server push
+  notifications to your phone. Intentional, but worth knowing.
+- Versions up to 0.1.3 shipped an HTTP server with OAuth 2.1 and an owner key.
+  Upgrading removes the service, the `.env` and the key. If you ran **0.1.0**,
+  that key was also written to a world-readable `FIRST-RUN.txt`
+  ([#2](https://github.com/dhanjit/windows-login-monitor/issues/2)) — treat it
+  as disclosed on any machine with other local accounts.

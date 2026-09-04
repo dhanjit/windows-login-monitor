@@ -1,104 +1,36 @@
 #!/usr/bin/env python3
-"""MCP server exposing the Windows login monitor to agents over HTTP.
+r"""MCP server exposing the Windows login monitor to agents over stdio.
 
 Tools:
-  - wlm_get_login_log        Tail C:\\Scripts\\login.log
+  - wlm_get_login_log        Tail C:\Scripts\login.log
   - wlm_get_recent_logons    Query Security event log (4624 / 4801)
   - wlm_check_phone_home     Ping the configured phone IP on the LAN
   - wlm_send_phone_alert     POST a notification to the configured ntfy topic
   - wlm_get_monitor_status   Scheduled task + audit policy + config + log summary
 
-Hosting model: local-first. Default bind is 127.0.0.1:8765. To make this
-reachable from a remote agent (Claude.ai, Cursor, etc.), point your own
-tunnel / reverse proxy / VPN at it (Cloudflare Tunnel, Tailscale Funnel,
-ngrok, Caddy + DDNS, ...). Set WLM_MCP_PUBLIC_URL + WLM_MCP_ALLOWED_HOSTS
-to whatever hostname your stack exposes.
+Transport: stdio only. The MCP client starts this process and speaks JSON-RPC
+over stdin/stdout, so there is no port, no credential and no service. Anything
+that can run this program could already read the same event log directly.
 
-Auth: OAuth 2.1 per the MCP 2025-06-18 Authorization spec.
-  - Dynamic Client Registration (RFC 7591) is open: any client can register.
-  - /authorize is gated by a single owner key (WLM_MCP_OWNER_KEY) so only the
-    operator can complete the authorization step.
-  - After that, each client gets its own opaque access + refresh tokens.
-"""
+Remote access is somebody else's job: put a server that fronts this one behind
+your own authenticated edge. See dhanjit/blackreach."""
 
 from __future__ import annotations
 
-import html
 import json
-import os
 import re
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import httpx
-import secrets
-import uvicorn
-from dotenv import load_dotenv
-from mcp.server.auth.settings import (
-    AuthSettings,
-    ClientRegistrationOptions,
-    RevocationOptions,
-)
 from mcp.server.fastmcp import FastMCP
-from mcp.server.transport_security import TransportSecuritySettings
-from pydantic import AnyHttpUrl
-from starlette.applications import Starlette
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
-
-from auth_provider import SimpleOAuthProvider
-
-def _install_dir() -> Path:
-    """Directory holding the .env file. For PyInstaller-frozen exes this is the
-    folder containing the exe (sys.executable); for source runs it's the folder
-    holding this script."""
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent
-
-
-def _state_dir() -> Path:
-    """User-writable directory for mutable state (auth_state.json, logs).
-    Program Files is read-only for non-admins; use %LOCALAPPDATA% instead."""
-    base = os.environ.get("WLM_MCP_STATE_DIR") or os.environ.get("LOCALAPPDATA")
-    if not base:
-        # Fallback for unusual envs (e.g. SYSTEM) — keep next to the install dir
-        return _install_dir()
-    d = Path(base) / "WindowsLoginMonitorMcp"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-load_dotenv(_install_dir() / ".env")
 
 LOGIN_ALERT_SCRIPT = Path(r"C:\Scripts\LoginAlert.ps1")
 LOGIN_LOG_FILE = Path(r"C:\Scripts\login.log")
 TASK_NAME = "LoginAlert"
 NTFY_BASE = "https://ntfy.sh"
-HOST = os.environ.get("WLM_MCP_HOST", "127.0.0.1")
-PORT = int(os.environ.get("WLM_MCP_PORT", "8765"))
-# Owner key: the operator's secret for the /authorize step. Renamed from
-# WLM_MCP_TOKEN; old name still accepted for backwards-compat.
-OWNER_KEY = (
-    os.environ.get("WLM_MCP_OWNER_KEY", "").strip()
-    or os.environ.get("WLM_MCP_TOKEN", "").strip()
-)
-# Public issuer URL — what clients see in metadata. For local testing this is
-# http://127.0.0.1:8765; behind a tunnel it must be the public hostname.
-PUBLIC_URL = os.environ.get("WLM_MCP_PUBLIC_URL", f"http://{HOST}:{PORT}").rstrip("/")
-
-# Hosts FastMCP's DNS-rebinding middleware will accept on the Host header.
-# Bearer-token auth is what actually keeps strangers out; this list just stops
-# DNS-rebind attacks from browsers that haven't authenticated.
-# Wildcard form "host:*" allows any port. Add public hostnames (e.g.
-# "blackreach.dhanjit.me") via WLM_MCP_ALLOWED_HOSTS as a comma-separated list.
-ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "host.docker.internal:*"] + [
-    h.strip() for h in os.environ.get("WLM_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()
-]
 
 
 def load_config() -> dict:
@@ -135,186 +67,7 @@ def run_powershell(snippet: str, timeout: float = 30.0) -> str:
     return result.stdout
 
 
-class HealthzMiddleware(BaseHTTPMiddleware):
-    """Unauthenticated /healthz probe for the cloudflared / Docker side."""
-
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path == "/healthz":
-            return JSONResponse({"ok": True})
-        return await call_next(request)
-
-
-class MetadataPatchMiddleware(BaseHTTPMiddleware):
-    """Patch the SDK's OAuth metadata so strict clients (Claude.ai) accept it.
-
-    The MCP SDK's build_metadata() hardcodes token_endpoint_auth_methods_supported
-    to the client_secret_* methods only — it never advertises 'none', even though
-    the server fully supports public clients (DCR with token_endpoint_auth_method
-    'none' + PKCE). A public client like Claude.ai rejects an AS that doesn't
-    advertise 'none'. We also drop the trailing slash pydantic adds to the issuer.
-    """
-
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
-        path = request.url.path
-        if not path.startswith("/.well-known/oauth-"):
-            return response
-
-        body = b""
-        async for chunk in response.body_iterator:  # type: ignore[attr-defined]
-            body += chunk
-        try:
-            meta = json.loads(body)
-        except Exception:
-            from starlette.responses import Response as _Resp
-            return _Resp(content=body, status_code=response.status_code,
-                         media_type=response.media_type)
-
-        if path == "/.well-known/oauth-authorization-server":
-            for key in ("token_endpoint_auth_methods_supported",
-                        "revocation_endpoint_auth_methods_supported"):
-                if meta.get(key) is not None:
-                    meta[key] = list(dict.fromkeys(list(meta[key]) + ["none"]))
-            if isinstance(meta.get("issuer"), str):
-                meta["issuer"] = meta["issuer"].rstrip("/")
-        elif path.startswith("/.well-known/oauth-protected-resource"):
-            if isinstance(meta.get("authorization_servers"), list):
-                meta["authorization_servers"] = [
-                    s.rstrip("/") if isinstance(s, str) else s
-                    for s in meta["authorization_servers"]
-                ]
-
-        return JSONResponse(meta, status_code=response.status_code)
-
-
-# Session token cookie that proves the owner has authenticated at /authorize.
-# Generated fresh at server start; restarting invalidates all sessions.
-_SESSION_COOKIE_NAME = "wlm_session"
-_SESSION_TOKEN = secrets.token_urlsafe(24)
-_SESSION_TTL = 60 * 30  # 30 minutes — enough to complete the auth dance
-
-
-_AUTH_FORM_HTML = """<!doctype html><html lang="en"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Windows Login Monitor MCP - Authorize</title>
-<style>
-  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 28rem; margin: 4rem auto; padding: 0 1rem; color: #111; }
-  h1   { font-size: 1.2rem; margin: 0 0 0.4rem; }
-  p    { color: #555; line-height: 1.45; }
-  input[type=password] { width: 100%; padding: 0.6rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 6px; box-sizing: border-box; }
-  button { width: 100%; padding: 0.7rem; font-size: 1rem; background: #111; color: #fff; border: 0; border-radius: 6px; margin-top: 0.6rem; cursor: pointer; }
-  .err { color: #b00020; margin-top: 0.5rem; }
-  code { background: #f4f4f5; padding: 0.1rem 0.3rem; border-radius: 4px; font-size: 0.85em; }
-</style></head><body>
-<h1>Authorize <code>__CLIENT__</code></h1>
-<p>This client is requesting access to <strong>Windows Login Monitor MCP</strong>. Enter the owner key from <code>.env</code> to approve.</p>
-<form method="POST" action="__ACTION__">
-  <input type="password" name="owner_key" placeholder="Owner key" autocomplete="off" autofocus>
-  __ERR__
-  <button type="submit">Authorize</button>
-</form>
-</body></html>"""
-
-
-class OwnerKeyGateMiddleware(BaseHTTPMiddleware):
-    """Before the SDK's OAuth /authorize handler runs, require the operator to
-    prove possession of the owner key.
-
-    The owner-key form POSTs to /authorize WITH the original OAuth query string
-    in its `action` attribute, so the POST request itself carries client_id,
-    code_challenge, etc. On a correct key we set a short-lived session cookie
-    and 303-redirect to that same path+query — the follow-up GET then sails
-    through to the SDK handler with all params intact. Relative URLs keep this
-    correct behind a TLS-terminating proxy (Cloudflare)."""
-
-    AUTHORIZE_PATH = "/authorize"
-
-    async def dispatch(self, request: Request, call_next):
-        if request.url.path != self.AUTHORIZE_PATH:
-            return await call_next(request)
-
-        # Already-authed session: pass through to the SDK handler.
-        if request.cookies.get(_SESSION_COOKIE_NAME) == _SESSION_TOKEN:
-            return await call_next(request)
-
-        # Relative path+query — scheme-agnostic, carries the OAuth params.
-        rel = request.url.path + (f"?{request.url.query}" if request.url.query else "")
-
-        if request.method == "POST":
-            form = await request.form()
-            provided = (form.get("owner_key") or "").strip()
-            if OWNER_KEY and secrets.compare_digest(provided, OWNER_KEY):
-                resp = RedirectResponse(rel, status_code=303)
-                resp.set_cookie(
-                    _SESSION_COOKIE_NAME, _SESSION_TOKEN,
-                    max_age=_SESSION_TTL, httponly=True, secure=False, samesite="lax",
-                )
-                return resp
-            # Bad key: re-show form with an error.
-            return HTMLResponse(_render_form(rel, error="Wrong owner key."), status_code=401)
-
-        # GET without cookie: show the form.
-        return HTMLResponse(_render_form(rel), status_code=200)
-
-
-def _render_form(action_url: str, error: str | None = None) -> str:
-    """Render the owner-key form. `action_url` (path+query of the /authorize
-    request) becomes the form's action verbatim, so the OAuth params ride the
-    POST — no hidden fields, no JS, no escaping games."""
-    from urllib.parse import urlparse, parse_qs
-    qs = parse_qs(urlparse(action_url).query)
-    client_id = (qs.get("client_id", [""])[0])[:60] or "(unknown client)"
-    err_html = f'<div class="err">{html.escape(error)}</div>' if error else ""
-    return (
-        _AUTH_FORM_HTML
-        .replace("__CLIENT__", html.escape(client_id))
-        .replace("__ACTION__", html.escape(action_url, quote=True))
-        .replace("__ERR__", err_html)
-    )
-
-
-def use_stdio(argv: Optional[list[str]] = None, env: Optional[dict] = None) -> bool:
-    """True when the client spawns us and talks over stdin/stdout.
-
-    stdio has no listener, so nothing can reach the server except the process
-    that started it — the OS is the access control. None of the OAuth machinery
-    applies, and requiring an owner key there would gate a door that isn't
-    there."""
-    argv = sys.argv if argv is None else argv
-    env = os.environ if env is None else env
-    return "--stdio" in argv or env.get("WLM_MCP_TRANSPORT", "").strip().lower() == "stdio"
-
-
-STDIO = use_stdio()
-
-_state_file = _state_dir() / "auth_state.json"
-oauth_provider = (
-    SimpleOAuthProvider(owner_key=OWNER_KEY, state_file=_state_file)
-    if OWNER_KEY and not STDIO
-    else None
-)
-
-mcp_kwargs: dict = dict(
-    transport_security=TransportSecuritySettings(
-        allowed_hosts=ALLOWED_HOSTS,
-        allowed_origins=ALLOWED_HOSTS,
-    ),
-)
-if oauth_provider:
-    mcp_kwargs["auth_server_provider"] = oauth_provider
-    mcp_kwargs["auth"] = AuthSettings(
-        issuer_url=AnyHttpUrl(PUBLIC_URL),
-        resource_server_url=AnyHttpUrl(f"{PUBLIC_URL}/mcp"),
-        client_registration_options=ClientRegistrationOptions(
-            enabled=True,
-            valid_scopes=["mcp"],
-            default_scopes=["mcp"],
-        ),
-        revocation_options=RevocationOptions(enabled=True),
-        required_scopes=["mcp"],
-    )
-
-mcp = FastMCP("windows_login_monitor_mcp", **mcp_kwargs)
+mcp = FastMCP("windows_login_monitor_mcp")
 
 
 @mcp.tool(
@@ -363,7 +116,7 @@ def wlm_get_recent_logons(hours: int = 24, limit: int = 50) -> str:
 
     Requires the server process to have Security-log read access — either as
     Administrator/SYSTEM or by being a member of the local 'Event Log Readers'
-    group. Install-McpServer.ps1 adds the current user to that group.
+    group. The installer adds the installing user to that group.
 
     Args:
         hours: Look-back window in hours (default 24, max 168 = 1 week).
@@ -597,42 +350,12 @@ if ($t) {{
     }, indent=2)
 
 
-def build_app() -> Starlette:
-    # Add middleware directly to the FastMCP Starlette app so its lifespan
-    # (which initializes the streamable-HTTP session manager) still runs.
-    app = mcp.streamable_http_app()
-    app.add_middleware(MetadataPatchMiddleware)
-    app.add_middleware(OwnerKeyGateMiddleware)
-    app.add_middleware(HealthzMiddleware)
-    return app
-
-
 def main() -> None:
-    if STDIO:
-        # stdout carries JSON-RPC frames: no log redirect, no banner, nothing
-        # else may write there. stderr is left alone so the client can surface
-        # our errors in its own logs.
-        mcp.run(transport="stdio")
-        return
-
-    # The frozen exe is built windowless (no console), so stdout/stderr have
-    # nowhere to go. Route them to a log file in the user-writable state dir
-    # before anything prints — keeps uvicorn logs and tracebacks recoverable.
-    if getattr(sys, "frozen", False):
-        try:
-            fh = open(_state_dir() / "server.log", "a", buffering=1,
-                      encoding="utf-8", errors="replace")
-            sys.stdout = fh
-            sys.stderr = fh
-        except OSError:
-            pass
-    if not OWNER_KEY:
-        raise SystemExit(
-            "ERROR: WLM_MCP_OWNER_KEY (or legacy WLM_MCP_TOKEN) is empty. "
-            "Set it in .env or env vars before starting."
-        )
-    print(f"[wlm-mcp] starting on http://{HOST}:{PORT}/mcp  (issuer={PUBLIC_URL})", flush=True)
-    uvicorn.run(build_app(), host=HOST, port=PORT, log_level="info")
+    """Serve over stdio. The client spawns this process and owns both ends of
+    the pipe, so there is nothing to bind, nothing to authenticate and nothing
+    to leave running. A `--stdio` argument is accepted and ignored: it is what
+    older registrations pass."""
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

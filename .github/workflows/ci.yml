@@ -27,52 +27,6 @@ jobs:
         working-directory: mcp-server
         run: pytest tests/ -v
 
-  integration-smoke:
-    name: Integration smoke (real OAuth + MCP roundtrip)
-    runs-on: windows-latest
-    needs: unit-tests
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - name: Install deps
-        working-directory: mcp-server
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements-dev.txt
-      - name: Start server + run oauth_smoke.py
-        working-directory: mcp-server
-        shell: pwsh
-        run: |
-          # CI-only owner key. Public URL stays loopback because we're not tunneling.
-          @"
-          WLM_MCP_OWNER_KEY=ci-test-owner-key-not-secret-7f3a9b2c
-          WLM_MCP_PUBLIC_URL=http://127.0.0.1:8765
-          "@ | Set-Content -Path .env -Encoding utf8NoBOM
-
-          $p = Start-Process python -ArgumentList "server.py" `
-              -RedirectStandardOutput server.log `
-              -RedirectStandardError server.err.log `
-              -NoNewWindow -PassThru
-
-          # Wait for /healthz
-          $ok = $false
-          for ($i = 0; $i -lt 40; $i++) {
-              Start-Sleep -Milliseconds 500
-              try { if ((Invoke-RestMethod http://127.0.0.1:8765/healthz -TimeoutSec 1).ok) { $ok = $true; break } } catch {}
-          }
-          if (-not $ok) {
-              Write-Host "--- stdout ---"; Get-Content server.log
-              Write-Host "--- stderr ---"; Get-Content server.err.log
-              throw "server didn't come up"
-          }
-          Write-Host "Server up. Running oauth_smoke.py..."
-          python oauth_smoke.py
-          $exitCode = $LASTEXITCODE
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          if ($exitCode -ne 0) { throw "oauth_smoke exit $exitCode" }
-
   validate-manifest:
     name: Validate winget manifest
     runs-on: windows-latest
@@ -85,7 +39,7 @@ jobs:
   build-installer:
     name: Build installer + smoke-run the bundled exe
     runs-on: windows-latest
-    needs: [unit-tests, integration-smoke]
+    needs: [unit-tests]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -118,27 +72,10 @@ jobs:
           $tag = "${{ github.ref_name }}"
           $version = if ($tag -match '^v(\d+\.\d+\.\d+)') { $Matches[1] } else { "0.0.0-ci" }
           .\build\build.ps1 -Version $version
-      - name: Smoke-run the bundled exe
+      - name: Smoke-run the bundled exe over stdio
         shell: pwsh
-        run: |
-          @"
-          WLM_MCP_OWNER_KEY=ci-test-owner-key-not-secret-7f3a9b2c
-          WLM_MCP_PUBLIC_URL=http://127.0.0.1:8765
-          "@ | Set-Content -Path dist\.env -Encoding utf8NoBOM
-          $p = Start-Process dist\windows-login-monitor-mcp.exe -WorkingDirectory dist `
-              -RedirectStandardOutput dist\bundle.log -RedirectStandardError dist\bundle.err -NoNewWindow -PassThru
-          $ok = $false
-          for ($i = 0; $i -lt 40; $i++) {
-              Start-Sleep -Milliseconds 500
-              try { if ((Invoke-RestMethod http://127.0.0.1:8765/healthz -TimeoutSec 1).ok) { $ok = $true; break } } catch {}
-          }
-          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
-          if (-not $ok) {
-              Write-Host "--- bundle.log ---"; Get-Content dist\bundle.log
-              Write-Host "--- bundle.err ---"; Get-Content dist\bundle.err
-              throw "bundled exe failed to come up"
-          }
-          Write-Host "Bundle smoke test OK"
+        run: python build/stdio_smoke.py dist/windows-login-monitor-mcp.exe
+
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4
         with:
