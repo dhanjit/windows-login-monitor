@@ -40,7 +40,10 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 }
 Get-Process windows-login-monitor-mcp -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 
-foreach ($stale in @(".env", "FIRST-RUN.txt", "server.log", "server.err.log")) {
+# Inno leaves behind files an older version installed that this one no longer
+# ships, so retired scripts have to be named here to actually go away.
+foreach ($stale in @(".env", "FIRST-RUN.txt", "server.log", "server.err.log",
+                     "Show-OwnerKey.ps1")) {
     $p = Join-Path $InstallDir $stale
     if (Test-Path -LiteralPath $p) {
         Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
