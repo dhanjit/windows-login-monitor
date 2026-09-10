@@ -20,6 +20,51 @@ if (-not $isAdmin) {
     exit 1
 }
 
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+# --- Lock a path to SYSTEM + Administrators + the installing user ---
+# C:\ hands every child an inherited "BUILTIN\Users: ReadAndExecute" ACE, so
+# anything dropped in C:\Scripts is readable by every local account on the box.
+# The ntfy topic is a password - anyone holding it can read your alerts - and
+# it gets baked into LoginAlert.ps1, so that default is a disclosure. login.log
+# is no better: it records who logged in and whether they were home. Break
+# inheritance and name the three principals that actually need access. Same
+# defect, same fix as #2, which was the MCP owner key in the install directory.
+#
+# The scheduled task runs as SYSTEM, which is why SYSTEM keeps FullControl -
+# it has to read the script and append to the log.
+function Set-RestrictiveAcl {
+    param(
+        [Parameter(Mandatory=$true)][string]$Path,
+        [switch]$Container
+    )
+    $item = Get-Item -LiteralPath $Path -Force
+    # Build a fresh descriptor instead of editing the one Get-Acl hands back.
+    # A new object carries no inherited ACEs, so there is nothing to strip:
+    # protection plus the three rules below is the whole DACL.
+    $acl = if ($Container) {
+        New-Object System.Security.AccessControl.DirectorySecurity
+    } else {
+        New-Object System.Security.AccessControl.FileSecurity
+    }
+    # $true  = protect from inheritance.
+    # $false = do NOT copy the inherited rules down first. They must disappear,
+    #          not be preserved as explicit ACEs, or BUILTIN\Users survives.
+    $acl.SetAccessRuleProtection($true, $false)
+
+    $inherit = if ($Container) { "ContainerInherit, ObjectInherit" } else { "None" }
+    foreach ($id in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", $me)) {
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $id, "FullControl", $inherit, "None", "Allow")))
+    }
+    # Persisted through the object's own method rather than Set-Acl. The cmdlet
+    # writes every section of the descriptor, the audit SACL included, and that
+    # needs SeSecurityPrivilege - it fails with PrivilegeNotHeldException even
+    # for a file you own. SetAccessControl writes only the DACL, which is all
+    # this changes.
+    $item.SetAccessControl($acl)
+}
+
 # --- Prompt: phone IP ---
 do {
     $phoneIP = Read-Host "Your phone's local IP (e.g. 192.168.1.50)"
@@ -36,6 +81,10 @@ if (-not (Test-Path $scriptDir)) {
     New-Item -ItemType Directory -Path $scriptDir | Out-Null
     Write-Host "Created $scriptDir" -ForegroundColor Green
 }
+# Unconditionally, not just on create: a folder left by an earlier run still
+# carries the inherited ACL, and re-running setup is how you'd expect to fix it.
+Set-RestrictiveAcl -Path $scriptDir -Container
+Write-Host "Restricted $scriptDir to SYSTEM, Administrators and $me" -ForegroundColor Green
 
 # --- Write the monitor script (config baked in) ---
 $monitorScript = @"
@@ -72,7 +121,11 @@ if (-not `$phoneHome) {
 
 $monitorPath = Join-Path $scriptDir "LoginAlert.ps1"
 Set-Content -Path $monitorPath -Value $monitorScript -Encoding UTF8
-Write-Host "Created $monitorPath" -ForegroundColor Green
+# This is the one file that has to keep the topic - the task reads it every
+# logon - so it gets the restricted ACL in its own right, not just by
+# inheritance from the folder.
+Set-RestrictiveAcl -Path $monitorPath
+Write-Host "Created $monitorPath (access-restricted)" -ForegroundColor Green
 
 # --- Register scheduled task (replace if present) ---
 $taskName = "LoginAlert"
@@ -112,27 +165,37 @@ Register-ScheduledTask -TaskName $taskName `
 Write-Host "Registered scheduled task: $taskName (logon + unlock triggers)" -ForegroundColor Green
 
 # --- Save config summary ---
+# Deliberately without the topic. This file is written once and read by
+# nothing, so a copy of the topic here would be a second cleartext credential
+# sitting around forever with no reader - exactly the defect in #2. The topic
+# is printed below and lives in LoginAlert.ps1, which needs it; one copy in a
+# file that has a reason to hold it beats two.
 $configPath = Join-Path $scriptDir "login-monitor-config.txt"
 @"
 === Windows Login Monitor ===
 Phone IP:       $phoneIP
-ntfy topic:     $topic
-ntfy URL:       https://ntfy.sh/$topic
 Monitor script: $monitorPath
 Log file:       $scriptDir\login.log
 Task name:      $taskName
 Triggers:       logon + workstation unlock (Security event 4801)
 Audit policy:   "Other Logon/Logoff Events" was enabled by setup
+Permissions:    $scriptDir is restricted to SYSTEM, Administrators and $me
+
+The ntfy topic is a password - anyone who knows it can read your alerts - so
+it is not recorded here. Setup printed it once when it ran, and it is the
+`$NtfyTopic line in $monitorPath.
 
 To receive alerts on your phone:
   1. Install the 'ntfy' app (Play Store / App Store)
-  2. Add subscription with topic name: $topic
+  2. Subscribe to the topic printed at the end of setup
 
 To uninstall:
   Unregister-ScheduledTask -TaskName $taskName -Confirm:`$false
   Remove-Item C:\Scripts\LoginAlert.ps1
 "@ | Set-Content -Path $configPath -Encoding UTF8
-Write-Host "Saved config to $configPath" -ForegroundColor Green
+# No topic in here, but it still gives up the phone IP and the layout.
+Set-RestrictiveAcl -Path $configPath
+Write-Host "Saved config to $configPath (access-restricted)" -ForegroundColor Green
 
 # --- Test notification ---
 Write-Host ""
@@ -151,8 +214,16 @@ try {
 }
 
 Write-Host ""
+Write-Host "=== YOUR NTFY TOPIC ===" -ForegroundColor Cyan
+Write-Host "  $topic" -ForegroundColor Green
+Write-Host ""
+Write-Host "Treat it as a password: anyone who knows it can read your alerts."
+Write-Host "This is the only place setup shows it - it is not written to the"
+Write-Host "config file. Store it somewhere real (a password manager) now. If"
+Write-Host "you lose it, it is the `$NtfyTopic line in $monitorPath."
+Write-Host ""
 Write-Host "=== NEXT STEPS ===" -ForegroundColor Cyan
-Write-Host "1. Install 'ntfy' on your phone, subscribe to topic: $topic"
+Write-Host "1. Install 'ntfy' on your phone, subscribe to the topic above"
 Write-Host "2. In your router, set a DHCP reservation so your phone always gets $phoneIP"
 Write-Host "3. Test: lock PC (Win+L), unlock - no alert (phone is home)"
 Write-Host "4. Test: turn off phone WiFi, unlock - you should get an alert"

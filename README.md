@@ -49,8 +49,12 @@ Tested on Windows 11 24H2. Should work on Server 2019/2022 but is not part of th
 - Enter your phone's IP and (optionally) a topic name when prompted
 - The script will:
   - Create `C:\Scripts\LoginAlert.ps1` with your config baked in
+  - Restrict `C:\Scripts` to SYSTEM, Administrators and you, so other local
+    accounts cannot read your topic or your login log
   - Register a scheduled task named `LoginAlert`
   - Send a test notification to confirm ntfy works
+- **Write the topic down when setup prints it.** That is the only place it is
+  shown; it is deliberately not saved to the config file.
 
 ### 3. Subscribe in the ntfy app
 
@@ -80,7 +84,7 @@ Edit and save — the scheduled task picks up the new values on the next logon.
 
 ## Notes & caveats
 
-- **Topic = password.** Anyone who knows your ntfy topic can see your alerts. Use a long, random one.
+- **Topic = password.** Anyone who knows your ntfy topic can see your alerts. Use a long, random one. Because it is a credential, setup keeps it in exactly one file that needs it — `LoginAlert.ps1` — and locks `C:\Scripts` down to SYSTEM, Administrators and the installing user. Left at the `C:\` default, every local account on the PC could read it, along with `login.log`, which records who signed in and whether they were home. Re-run setup to reapply the permissions to a folder created by an older version.
 - **Phone Wi-Fi sleeps.** Some Android/iOS power-saving modes drop Wi-Fi when the screen is off, which can cause false alarms. If you see them, tweak the script to ping 3+ times with delays, or whitelist a known-good time window.
 - **RDP / network logons.** The default `AtLogOn` trigger catches console logons and unlocks. To also catch RDP, add a second trigger on Security Event ID 4624 with logon type 10.
 - **Random MAC addresses** don't matter here — we identify the phone by IP via DHCP reservation, not MAC.
