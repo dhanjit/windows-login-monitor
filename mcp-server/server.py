@@ -24,8 +24,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import httpx
-from mcp.server.fastmcp import FastMCP
+import httpx2
+from mcp.server.mcpserver import MCPServer
+from mcp.types import ToolAnnotations
 
 LOGIN_ALERT_SCRIPT = Path(r"C:\Scripts\LoginAlert.ps1")
 LOGIN_LOG_FILE = Path(r"C:\Scripts\login.log")
@@ -67,17 +68,17 @@ def run_powershell(snippet: str, timeout: float = 30.0) -> str:
     return result.stdout
 
 
-mcp = FastMCP("windows_login_monitor_mcp")
+mcp = MCPServer("windows_login_monitor_mcp")
 
 
 @mcp.tool(
-    annotations={
-        "title": "Get login monitor log",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
+    annotations=ToolAnnotations(
+        title="Get login monitor log",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
 )
 def wlm_get_login_log(lines: int = 20) -> str:
     """Return the trailing N lines from C:\\Scripts\\login.log.
@@ -103,13 +104,13 @@ def wlm_get_login_log(lines: int = 20) -> str:
 
 
 @mcp.tool(
-    annotations={
-        "title": "Get recent Windows logon events",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
+    annotations=ToolAnnotations(
+        title="Get recent Windows logon events",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
 )
 def wlm_get_recent_logons(hours: int = 24, limit: int = 50) -> str:
     """Query the Windows Security event log for recent logon (4624) and unlock (4801) events.
@@ -164,13 +165,13 @@ if ($null -eq $out) {{ "[]" }} else {{ ,@($out) | ConvertTo-Json -Compress -Dept
 
 
 @mcp.tool(
-    annotations={
-        "title": "Check whether the phone is on the home LAN",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
+    annotations=ToolAnnotations(
+        title="Check whether the phone is on the home LAN",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    )
 )
 def wlm_check_phone_home() -> str:
     """Ping the configured phone IP and report whether it responded.
@@ -203,13 +204,13 @@ def wlm_check_phone_home() -> str:
 
 
 @mcp.tool(
-    annotations={
-        "title": "Send a push notification to my phone",
-        "readOnlyHint": False,
-        "destructiveHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
+    annotations=ToolAnnotations(
+        title="Send a push notification to my phone",
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True,
+    )
 )
 async def wlm_send_phone_alert(
     body: str,
@@ -253,11 +254,11 @@ async def wlm_send_phone_alert(
         headers["Tags"] = ",".join(t for t in tags if t)[:200]
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        async with httpx2.AsyncClient(timeout=15.0) as client:
             r = await client.post(f"{NTFY_BASE}/{topic}", content=body.encode("utf-8"), headers=headers)
             r.raise_for_status()
             data = r.json()
-    except httpx.HTTPStatusError as e:
+    except httpx2.HTTPStatusError as e:
         return json.dumps({"sent": False, "error": f"ntfy HTTP {e.response.status_code}: {e.response.text[:200]}"})
     except Exception as e:
         return json.dumps({"sent": False, "error": f"{type(e).__name__}: {e}"})
@@ -266,13 +267,13 @@ async def wlm_send_phone_alert(
 
 
 @mcp.tool(
-    annotations={
-        "title": "Get login-monitor status",
-        "readOnlyHint": True,
-        "destructiveHint": False,
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
+    annotations=ToolAnnotations(
+        title="Get login-monitor status",
+        read_only_hint=True,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False,
+    )
 )
 def wlm_get_monitor_status() -> str:
     """Report whether the login monitor is set up correctly on this PC.
