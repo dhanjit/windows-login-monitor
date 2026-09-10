@@ -38,7 +38,6 @@ function Set-RestrictiveAcl {
         [Parameter(Mandatory=$true)][string]$Path,
         [switch]$Container
     )
-    $item = Get-Item -LiteralPath $Path -Force
     # Build a fresh descriptor instead of editing the one Get-Acl hands back.
     # A new object carries no inherited ACEs, so there is nothing to strip:
     # protection plus the three rules below is the whole DACL.
@@ -62,7 +61,24 @@ function Set-RestrictiveAcl {
     # needs SeSecurityPrivilege - it fails with PrivilegeNotHeldException even
     # for a file you own. SetAccessControl writes only the DACL, which is all
     # this changes.
-    $item.SetAccessControl($acl)
+    #
+    # Fatal on failure, deliberately. Carrying on would leave the topic on disk
+    # readable by every local account while setup printed success - the exact
+    # state this is here to prevent. The directory is locked before anything
+    # secret is written into it, so failing here means nothing has leaked yet.
+    try {
+        # -ErrorAction Stop or the catch never fires: a cmdlet's errors are
+        # non-terminating by default, so Get-Item would report and return $null
+        # and the method call below would be the thing that blew up.
+        (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).SetAccessControl($acl)
+    } catch {
+        Write-Host ""
+        Write-Host "ERROR: could not restrict permissions on $Path" -ForegroundColor Red
+        Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Stopping: continuing would leave your ntfy topic readable by" -ForegroundColor Red
+        Write-Host "every local account on this PC. Re-run as Administrator." -ForegroundColor Red
+        exit 1
+    }
 }
 
 # --- Prompt: phone IP ---
