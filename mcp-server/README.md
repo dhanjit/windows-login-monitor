@@ -15,8 +15,8 @@ a server of your own behind an authenticated edge — see
 |---|---|---|
 | OS | Windows 10 (build 1809) or Windows 11 — x64 | Windows 11 24H2 (build 26100) |
 | PowerShell | 5.1 (built into Windows 10/11) | 5.1.26100.8115 |
-| Python (only if running from source; not needed for winget install) | 3.10+ | 3.13.13 |
-| MCP SDK | 1.27.0+ | 1.27.1 |
+| Python (only if running from source; not needed for winget install) | 3.10+ | 3.10.21, 3.11.16, 3.12.12, 3.13.15 |
+| MCP SDK | 2.2.0+ | 2.2.0 |
 
 Windows Server 2019/2022 should work but is not part of the test matrix. ARM64 Windows is not supported (PyInstaller bundles for x64 only).
 
@@ -28,7 +28,7 @@ Windows Server 2019/2022 should work but is not part of the test matrix. ARM64 W
                    │ JSON-RPC on stdin/stdout
    ┌───────────────▼────────────────┐
    │ windows-login-monitor-mcp.exe  │
-   │   FastMCP over stdio           │
+   │   MCPServer over stdio         │
    │   no port, no key, no service  │
    └───────────────┬────────────────┘
                    │

@@ -1,7 +1,9 @@
-# <2: SDK 2.x renamed FastMCP to MCPServer and changed the auth APIs this
-# server builds on (mcp.server.fastmcp, OAuthAuthorizationServerProvider).
-# Migrating is its own piece of work - until then an uncapped range installs
-# 2.x and the server fails to import.
-mcp[cli]>=1.27,<2
-httpx>=0.27
+# No upper cap by standing rule: track the latest MCP SDK rather than pinning.
+# The floor is the API this server is written against - 2.x renamed FastMCP to
+# MCPServer (mcp.server.mcpserver) and moved the wire types to mcp-types.
+mcp[cli]>=2.2
 
+# The SDK dropped httpx for httpx2 (github.com/pydantic/httpx2), so httpx2 is in
+# the tree either way; wlm_send_phone_alert uses it directly rather than drag a
+# second HTTP stack into the bundled exe. Declared because we import it.
+httpx2>=2.5

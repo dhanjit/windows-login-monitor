@@ -9,16 +9,21 @@ from PyInstaller.utils.hooks import collect_all
 # mcp + its sub-packages have a lot of dynamic imports - pull everything in.
 mcp_datas, mcp_binaries, mcp_hidden = collect_all("mcp")
 
+# SDK 2.x moved the wire types out to their own top-level package. collect_all
+# on "mcp" does not reach it, and the miss only shows up at runtime.
+types_datas, types_binaries, types_hidden = collect_all("mcp_types")
+
 block_cipher = None
 
 a = Analysis(
     ["..\\mcp-server\\server.py"],
     pathex=["..\\mcp-server"],
-    binaries=mcp_binaries,
-    datas=mcp_datas,
+    binaries=[*mcp_binaries, *types_binaries],
+    datas=[*mcp_datas, *types_datas],
     hiddenimports=[
         *mcp_hidden,
-        "httpx",
+        *types_hidden,
+        "httpx2",
     ],
     hookspath=[],
     hooksconfig={},
